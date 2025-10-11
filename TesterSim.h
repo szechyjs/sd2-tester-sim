@@ -7,6 +7,7 @@
 #include <QMap>
 #include <QObject>
 #include <QString>
+#include <QSerialPort>
 
 constexpr int CHKSUM_BUF_SIZE = 110;
 constexpr int DEFAULT_SNAPSHOT_SIZE = 16;
@@ -51,7 +52,7 @@ signals:
 
 private:
   bool m_shutdown = false;
-  int m_sockFd = -1;
+  QSerialPort m_port;
   uint8_t m_inbuf[128];
   uint8_t m_outbuf[128];
   uint8_t m_checksumBuf[CHKSUM_BUF_SIZE];

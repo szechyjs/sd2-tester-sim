@@ -2,7 +2,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 #include <chrono>
@@ -67,7 +66,7 @@ int TesterSim::readBytes(uint8_t* buf, int count)
 
   while ((bufPos < count) && !m_shutdown)
   {
-    readResult = read(m_sockFd, buf + bufPos, count - bufPos);
+    readResult = m_port.read((char*)(buf + bufPos), count - bufPos);
     if (readResult > 0)
     {
       bufPos += readResult;
@@ -93,7 +92,7 @@ bool TesterSim::sendReply(bool print)
       printPacket(m_outbuf);
     }
 
-    const int wroteBytes = write(m_sockFd, m_outbuf, len);
+    const int wroteBytes = m_port.write((char*)m_outbuf, len);
     status = (wroteBytes == len);
   }
   return status;
@@ -149,24 +148,9 @@ bool TesterSim::processBuf(bool print)
 bool TesterSim::connectToSocket(const QString &sockPath)
 {
   bool status = false;
-  struct sockaddr_un addr;
 
-  m_sockFd = socket((AF_UNIX), SOCK_STREAM, 0);
-  if (m_sockFd > 0)
-  {
-    memset(&addr, 0, sizeof(struct sockaddr_un));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, sockPath.toStdString().c_str(), sizeof(addr.sun_path) - 1);
-
-    if (::connect(m_sockFd, (const struct sockaddr*)&addr, sizeof(struct sockaddr_un)) == 0)
-    {
-      status = true;
-    }
-    else
-    {
-      m_sockFd = -1;
-    }
-  }
+  QSerialPort m_port = QSerialPort(sockPath);
+  m_port.open(QIODevice::ReadWrite);
 
   return status;
 }
@@ -174,10 +158,7 @@ bool TesterSim::connectToSocket(const QString &sockPath)
 void TesterSim::stopListening()
 {
   m_shutdown = true;
-  if (m_sockFd >= 0)
-  {
-    shutdown(m_sockFd, SHUT_RDWR);
-  }
+  m_port.close();
 }
 
 /**
