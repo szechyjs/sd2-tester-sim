@@ -108,8 +108,32 @@ bool TesterSim::findCompletePacket(uint8_t* packetBuf, int& packetSize)
   int headerBytes = m_receiveBuffer.peek(header, 3);
   if (headerBytes != 3) return false;
   
-  // Calculate full packet size: header[2] + 1 (including the size byte itself)
-  packetSize = header[2] + 1;
+  // Validate header bytes for reframing
+  uint8_t prefix = header[0];
+  uint8_t lengthHi = header[1];
+  uint8_t lengthLo = header[2];
+  
+  // Check if prefix byte is valid (0x50, 0x4d, or 0x54)
+  if (prefix != 0x50 && prefix != 0x4d && prefix != 0x54)
+  {
+    // Invalid prefix byte - reset buffer to reframe
+    emit logMsg(QString("Invalid prefix byte 0x%1 - resetting buffer for reframing").arg(prefix, 2, 16, QChar('0')));
+    m_receiveBuffer.clear();
+    return false;
+  }
+  
+  // Calculate full packet size: length bytes + prefix byte
+  // Length is stored as 16-bit value in bytes 1 and 2
+  uint16_t length = (static_cast<uint16_t>(lengthHi) << 8) | lengthLo;
+  packetSize = length + 1; // +1 for the prefix byte
+  
+  // Validate minimum packet size (7 bytes: prefix + 2 length bytes + 4 payload bytes)
+  if (packetSize < 7)
+  {
+    emit logMsg(QString("Invalid packet size %1 (minimum 7 bytes) - resetting buffer for reframing").arg(packetSize));
+    m_receiveBuffer.clear();
+    return false;
+  }
   
   // Check if we have enough data for the complete packet
   if (m_receiveBuffer.available() < packetSize) return false;
@@ -206,8 +230,8 @@ bool TesterSim::processBuf(bool print)
 bool TesterSim::connectToSocket(const QString &sockPath)
 {
   m_port.setPortName(sockPath);
-  m_port.setBaudRate(38400);
-  //m_port.setBaudRate(115200);
+  //m_port.setBaudRate(38400);  //SD2
+  m_port.setBaudRate(115200);   //SDX
   return m_port.open(QIODevice::ReadWrite);
 }
 
