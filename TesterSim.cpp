@@ -110,16 +110,10 @@ bool TesterSim::findCompletePacket(uint8_t* packetBuf, int& packetSize)
   int available = m_receiveBuffer.available();
   if (available <= 0) return false;
 
-  // Determine expected prefix based on tester type
-  uint8_t expectedPrefix = 0;
-  if (m_testerType == TesterType::SD2)
-  {
-    expectedPrefix = 0x50; // 'P'
-  }
-  else if (m_testerType == TesterType::xBOARD)
-  {
-    expectedPrefix = 0x57; // 'WAY'
-  }
+  // Determine header by tester type; treat as string to obtain length generically
+  const bool isXBoard = (m_testerType == TesterType::xBOARD);
+  const char* headerStr = isXBoard ? "WAY" : "P";
+  const int headerLen = static_cast<int>(strlen(headerStr));
 
   // Peek as much as available (bounded by the circular buffer capacity)
   uint8_t temp[CIRCULAR_BUFFER_SIZE];
@@ -131,30 +125,49 @@ bool TesterSim::findCompletePacket(uint8_t* packetBuf, int& packetSize)
   int maxAdvance = 0; // how many bytes we can safely discard (shift) if no full packet is found
   for (int i = 0; i < peeked; ++i)
   {
-    if (temp[i] != expectedPrefix)
+    // Ensure we have enough to check the full header
+    if (i + headerLen > peeked)
     {
-      // not a start byte, we can skip it
+      // keep possible partial header; drop bytes before it
+      if (i > 0) m_receiveBuffer.advance(i);
+      return false;
+    }
+
+    // Check header match
+    if (memcmp(&temp[i], headerStr, headerLen) != 0)
+    {
       maxAdvance = i + 1;
       continue;
     }
 
-    // Found a potential start. Ensure we have at least the 3-byte header
-    if (i + 3 > peeked)
+    // Found a potential start. Ensure we have at least the header and the 2-byte length
+    const int lengthIndex = i + headerLen;
+    if (lengthIndex + 2 > peeked)
     {
       // Keep the potential prefix for next time; drop bytes before it
       if (i > 0) m_receiveBuffer.advance(i);
       return false;
     }
 
-    const uint8_t lengthHi = temp[i + 1];
-    const uint8_t lengthLo = temp[i + 2];
+    const uint8_t lengthHi = temp[lengthIndex + 0];
+    const uint8_t lengthLo = temp[lengthIndex + 1];
 
-    // Total packet size is prefix + length (16-bit)
+    // Interpret length according to protocol
     const uint16_t length = (static_cast<uint16_t>(lengthHi) << 8) | lengthLo;
-    packetSize = static_cast<int>(length) + 1;
+    if (!isXBoard)
+    {
+      // SD2: packetSize = prefix(1) + length
+      packetSize = static_cast<int>(length) + 1;
+    }
+    else
+    {
+      // xBOARD: length includes the entire message (header and checksum)
+      packetSize = static_cast<int>(length);
+    }
 
-    // Sanity check minimum size (prefix + 2 length bytes + 4 payload bytes)
-    if (packetSize < 7)
+    // Sanity check minimum size
+    const int minPacketSize = isXBoard ? 9 : 7; // xBOARD includes 3-byte header and checksum
+    if (packetSize < minPacketSize)
     {
       // Invalid size at this prefix; skip this prefix and continue searching
       emit logMsg(QString("Invalid packet size %1 at prefix; shifting to next candidate").arg(packetSize));
@@ -226,6 +239,7 @@ bool TesterSim::processBuf(bool print)
   bool status = false;
   const uint8_t size = m_inbuf[2] + 1;
 
+  // TODO: update this to handle xBOARD packets
   if (size >= 7)
   {
     memcpy(m_outbuf, m_inbuf, size); // tablet SW usually starts by copying the message
