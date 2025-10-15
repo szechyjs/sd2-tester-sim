@@ -399,7 +399,7 @@ void TesterSim::process01TabletInfo(const Packet& /*inbuf*/, Packet &out, Tester
     0,   // serial num hi
     212, // serial num lo
   };
-  out.setReply(true, outbuf);
+  out.setReplyData(outbuf);
 }
 
 void TesterSim::process02SerialNo(const Packet& /*in*/, Packet& out, TesterSim* sim)
@@ -409,12 +409,12 @@ void TesterSim::process02SerialNo(const Packet& /*in*/, Packet& out, TesterSim* 
     0,   // hi byte
     212, // lo byte
   };
-  out.setReply(true, outbuf);
+  out.setReplyData(outbuf);
 }
 
 void TesterSim::process09(const Packet& /*in*/, Packet& out, TesterSim* /*sim*/)
 {
-  out.setReply(true, {0x10});
+  out.setReplyData({0x10});
 }
 
 void TesterSim::process0AWorkshopData(const Packet& in, Packet& out, TesterSim* sim)
@@ -983,8 +983,7 @@ void TesterSim::process1C(const Packet& in, Packet& out, TesterSim* sim)
   {
     sim->log("Thread not yet running; replying with negative status from applModGen...");
     //outbuf[5] = 0;
-    //outbuf[7] = 0xfe;
-    out.setReply(false, {});
+    out.setReplyData({0xfe});
   }
 }
 
@@ -1147,8 +1146,7 @@ void TesterSim::process2BGetNextDirEntry(const Packet& in, Packet& out, TesterSi
   else
   {
     // indicate end of directory
-    //outbuf[7] = 4;
-    out.setReply(false, {});
+    out.setReplyData({4});
   }
 }
 
@@ -1164,7 +1162,7 @@ void TesterSim::process3AGetDateTime(const Packet& /*in*/, Packet& out, TesterSi
     0x23,
     0x06,
   };
-  out.setReply(true, outbuf);
+  out.setReplyData(outbuf);
 }
 
 void TesterSim::process3DEraseFlash(const Packet& in, Packet& out, TesterSim* sim)
@@ -1177,7 +1175,7 @@ void TesterSim::process60SiliconNumber(const Packet& /*in*/, Packet& out, Tester
 {
   sim->log("Request silicon number");
   std::vector<uint8_t> outbuf(8, 0);
-  out.setReply(true, outbuf);
+  out.setReplyData(outbuf);
 }
 
 void TesterSim::process61SetBoard(const Packet& in, Packet& out, TesterSim* sim)

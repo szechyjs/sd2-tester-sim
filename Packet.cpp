@@ -19,7 +19,7 @@ void Packet::configureHeader()
   }
 }
 
-void Packet::setReply(bool success, const std::vector<uint8_t> &data)
+void Packet::configureReplyHeader()
 {
   m_header.clear();
   if (m_testerType == TesterType::xBOARD)
@@ -30,6 +30,11 @@ void Packet::setReply(bool success, const std::vector<uint8_t> &data)
   {
     m_header = {'T'};
   }
+}
+
+void Packet::setReply(bool success, const std::vector<uint8_t> &data)
+{
+  configureReplyHeader();
   uint8_t successVal = isSD2() ? 0x01 : 0x00;
   if (!success) {
     successVal ^= 1;
@@ -37,6 +42,12 @@ void Packet::setReply(bool success, const std::vector<uint8_t> &data)
   std::vector<uint8_t> replyData = { successVal };
   replyData.insert(replyData.end(), data.begin(), data.end());
   m_data = replyData;
+}
+
+void Packet::setReplyData(const std::vector<uint8_t> &data)
+{
+  configureReplyHeader();
+  m_data = data;
 }
 
 bool Packet::isXBoard() const { return m_testerType == TesterType::xBOARD; }

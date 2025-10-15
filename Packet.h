@@ -25,12 +25,14 @@ public:
   // Mutators
   void setCommand(uint8_t cmd) { m_command = cmd; }
   void setData(const std::vector<uint8_t>& data) { m_data = data; }
+  void setReplyData(const std::vector<uint8_t>& data);
   void setModule(uint8_t module) { m_module = module; }
   void setReply(bool success, const std::vector<uint8_t>&data);
 
 private:
   // Protocol helpers
   void configureHeader();
+  void configureReplyHeader();
   uint8_t computeChecksum(const std::vector<uint8_t>& bytes) const;
   bool isXBoard() const;
   bool isSD2() const;
