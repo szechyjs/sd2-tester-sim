@@ -29,6 +29,15 @@ enum class ProtocolType
   BilsteinSuspension
 };
 
+enum class TesterType
+{
+    SD2,
+    xBOARD,
+    F458CHP,
+    F458GT3,
+    F599XX
+};
+
 class TesterSim : public QObject
 {
   Q_OBJECT
@@ -55,6 +64,7 @@ private:
   bool m_shutdown = false;
   QSerialPort m_port;
   CircularBuffer m_receiveBuffer;
+  TesterType m_testerType = TesterType::SD2;
   uint8_t m_inbuf[128];
   uint8_t m_outbuf[128];
   uint8_t m_checksumBuf[CHKSUM_BUF_SIZE];
@@ -83,8 +93,8 @@ private:
   void chdir(const std::string& dir);
   void addToFile(const std::string& name, int numBytes);
   void emitConsecutiveWriteToFileSignal();
+  void setTesterType(TesterType);
   
-  // New circular buffer and packet processing methods
   bool fillReceiveBuffer();
   bool findCompletePacket(uint8_t* packetBuf, int& packetSize);
   bool extractPacketFromBuffer(uint8_t* packetBuf, int packetSize);
@@ -114,6 +124,10 @@ private:
   static void process2BGetNextDirEntry(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
   static void process3AGetDateTime(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
   static void process3DEraseFlash(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
+  static void process60SiliconNumber(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
+  static void process61SetBoard(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
+  static void process62SendReset(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
+  static void process63TesterStatus(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
 
   static void processKWP71CommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim, bool hasVerbosePayload);
   static void processFIAT9141CommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim, bool hasVerbosePayload);

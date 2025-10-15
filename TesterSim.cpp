@@ -24,6 +24,7 @@ std::map<uint8_t,std::function<void(const uint8_t*,uint8_t*,TesterSim*)>> Tester
   { 0x15, TesterSim::process15DisplayString },
   { 0x1C, TesterSim::process1C },
   { 0x1E, TesterSim::process1ECloseFile },
+    // 0x1F - 31, setBoard  // SDX?
   { 0x20, TesterSim::process20OpenFileForWriting },
   { 0x21, TesterSim::process21WriteToFile },
   { 0x23, TesterSim::process23OpenFileForReading },
@@ -32,7 +33,12 @@ std::map<uint8_t,std::function<void(const uint8_t*,uint8_t*,TesterSim*)>> Tester
   { 0x2A, TesterSim::process2AChdir },
   { 0x2B, TesterSim::process2BGetNextDirEntry },
   { 0x3A, TesterSim::process3AGetDateTime },
-  { 0x3D, TesterSim::process3DEraseFlash }
+    // 0x3B - 59, SetDateTimeBoard
+  { 0x3D, TesterSim::process3DEraseFlash },
+  { 0x60, TesterSim::process60SiliconNumber },
+  { 0x61, TesterSim::process61SetBoard }, // SD2?
+  { 0x62, TesterSim::process62SendReset },
+  { 0x63, TesterSim::process63TesterStatus },
 };
 
 
@@ -113,8 +119,18 @@ bool TesterSim::findCompletePacket(uint8_t* packetBuf, int& packetSize)
   uint8_t lengthHi = header[1];
   uint8_t lengthLo = header[2];
   
-  // Check if prefix byte is valid (0x50, 0x4d, or 0x54)
-  if (prefix != 0x50 && prefix != 0x4d && prefix != 0x54)
+  // SD2 prefix "P" 0x50
+  // SDX prefix "WAY" 0x57
+  uint8_t expectedPrefix = 0;
+  if (m_testerType == TesterType::SD2)
+  {
+    expectedPrefix = 0x50;
+  } else if (m_testerType == TesterType::xBOARD)
+  {
+    expectedPrefix = 0x57;
+  }
+
+  if (prefix != expectedPrefix )
   {
     // Invalid prefix byte - reset buffer to reframe
     emit logMsg(QString("Invalid prefix byte 0x%1 - resetting buffer for reframing").arg(prefix, 2, 16, QChar('0')));
@@ -1102,6 +1118,49 @@ void TesterSim::process3DEraseFlash(const uint8_t* inbuf, uint8_t* outbuf, Teste
   outbuf[7] = 1;
 }
 
+void TesterSim::process60SiliconNumber(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+{
+  sim->log("Request silicon number");
+  outbuf[2] = 14;
+  outbuf[7] = 0;
+  outbuf[8] = 0;
+  outbuf[9] = 0;
+  outbuf[10] = 0;
+  outbuf[11] = 0;
+  outbuf[12] = 0;
+  outbuf[13] = 0;
+  outbuf[14] = 0;
+}
+
+void TesterSim::process61SetBoard(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+{
+  sim->log("Set board");
+  uint8_t boardType = inbuf[7];
+  if (boardType == 2)
+  {
+    sim->setTesterType(TesterType::xBOARD);
+  }
+  else if (boardType == 1)
+  {
+    sim->setTesterType(TesterType::SD2);
+  }
+}
+
+void TesterSim::process62SendReset(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+{
+  sim->log("Request reset");
+}
+
+void TesterSim::process63TesterStatus(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+{
+  sim->log("Request for Tester status");
+  outbuf[2] = 11;
+  outbuf[8] = 0;
+  outbuf[9] = 7;
+  outbuf[10] = 0x14;
+  outbuf[11] = 0x5d;
+}
+
 bool TesterSim::loadState(const QString& filename)
 {
   bool status = false;
@@ -1167,3 +1226,15 @@ void TesterSim::setErrorMemoryContent(const std::vector<uint8_t>& content)
   emit logMsg(QString("Set error memory with %1 bytes").arg(content.size()));
 }
 
+void TesterSim::setTesterType(TesterType testerType)
+{
+  m_testerType = testerType;
+  if (m_testerType == TesterType::SD2)
+  {
+    m_port.setBaudRate(38400);
+  }
+  else if (m_testerType == TesterType::xBOARD)
+  {
+    m_port.setBaudRate(115200);
+  }
+}
