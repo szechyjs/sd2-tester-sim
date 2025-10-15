@@ -2,7 +2,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <sys/un.h>
 #include <unistd.h>
 #include <chrono>
 #include <thread>
@@ -61,18 +60,16 @@ void TesterSim::setValue(uint16_t id, uint32_t val)
 
 int TesterSim::readBytes(uint8_t* buf, int count)
 {
-  int bufPos = 0;
-  int readResult = 0;
-
-  while ((bufPos < count) && !m_shutdown)
+  while(m_port.bytesAvailable() < count)
   {
-    readResult = m_port.read((char*)(buf + bufPos), count - bufPos);
-    if (readResult > 0)
-    {
-      bufPos += readResult;
-    }
+      // wait
+      if (m_shutdown)
+      {
+          return 0;
+      }
   }
-  return bufPos;
+
+  return m_port.read(reinterpret_cast<char*>(buf), count);
 }
 
 bool TesterSim::sendReply(bool print)
@@ -92,7 +89,8 @@ bool TesterSim::sendReply(bool print)
       printPacket(m_outbuf);
     }
 
-    const int wroteBytes = m_port.write((char*)m_outbuf, len);
+    const int wroteBytes = m_port.write(reinterpret_cast<char*>(m_outbuf), len);
+    m_port.waitForBytesWritten();
     status = (wroteBytes == len);
   }
   return status;
@@ -147,12 +145,10 @@ bool TesterSim::processBuf(bool print)
 
 bool TesterSim::connectToSocket(const QString &sockPath)
 {
-  bool status = false;
-
-  QSerialPort m_port = QSerialPort(sockPath);
-  m_port.open(QIODevice::ReadWrite);
-
-  return status;
+  m_port.setPortName(sockPath);
+  m_port.setBaudRate(38400);
+  //m_port.setBaudRate(115200);
+  return m_port.open(QIODevice::ReadWrite);
 }
 
 void TesterSim::stopListening()
@@ -243,7 +239,6 @@ bool TesterSim::listen()
       status = false;
     }
   }
-
   return status;
 }
 
@@ -262,8 +257,8 @@ void TesterSim::process01TabletInfo(const uint8_t* /*inbuf*/, uint8_t* outbuf, T
   outbuf[14] = 0x05; // OS min version
   outbuf[15] = 0x04; // OS date (day)
   outbuf[16] = 0x03; // OS date (month)
-  outbuf[17] = 0x19; // OS date (decade)
-  outbuf[18] = 0x99; // OS date (year)
+  outbuf[17] = 0x14; // OS date (decade)
+  outbuf[18] = 0x19; // OS date (year)
   outbuf[19] = 0x00; // free space on flash storage (32 bit val)
   outbuf[20] = 0x23;
   outbuf[21] = 0x33;

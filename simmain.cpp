@@ -6,13 +6,17 @@
 #include <vector>
 #include "ui_simmain.h"
 #include <iostream>
+#include <QSerialPortInfo>
 
 SimMain::SimMain(const QString& domainSockName, QWidget* parent)
   : QMainWindow(parent)
   , ui(new Ui::SimMain)
 {
   ui->setupUi(this);
-  ui->domainSocketLine->setText(domainSockName);
+  foreach (const QSerialPortInfo &Port, QSerialPortInfo::availablePorts() )
+  {
+    ui->comPorts->addItem(Port.portName());
+  }
   connect(&m_sim, &TesterSim::logMsg, this, &SimMain::onLogMsg);
   connect(&m_sim, &TesterSim::lastLogMsgRepeated, this, &SimMain::onLastLogMsgRepeated);
   connect(&m_sim, &TesterSim::consecutiveWriteToFileCmd, this, &SimMain::onConsecutiveWriteToFile);
@@ -36,9 +40,10 @@ void SimMain::listenOnSock(SimMain* sim)
 
 void SimMain::on_startListeningButton_clicked()
 {
-  const QString domainSockName = ui->domainSocketLine->text();
-  if (m_sim.connectToSocket(domainSockName))
+  const QString serialPortName = ui->comPorts->currentText();
+  if (m_sim.connectToSocket(serialPortName))
   {
+    ui->comPorts->setEnabled(false);
     ui->startListeningButton->setEnabled(false);
     ui->stopListeningButton->setEnabled(true);
     m_simthread = std::thread(SimMain::listenOnSock, this);
@@ -46,7 +51,7 @@ void SimMain::on_startListeningButton_clicked()
   }
   else
   {
-    log(QString("Could not connect to domain socket '%1'").arg(domainSockName));
+    log(QString("Could not connect to serial port '%1'").arg(serialPortName));
   }
 }
 
@@ -59,6 +64,7 @@ void SimMain::on_stopListeningButton_clicked()
   }
   ui->startListeningButton->setEnabled(true);
   ui->stopListeningButton->setEnabled(false);
+  ui->comPorts->setEnabled(true);
 }
 
 void SimMain::on_ramSetButton_clicked()

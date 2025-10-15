@@ -16,11 +16,7 @@
   <widget class="QWidget" name="centralwidget">
    <layout class="QGridLayout" name="gridLayout">
     <item row="0" column="2" colspan="4">
-     <widget class="QLineEdit" name="domainSocketLine">
-      <property name="text">
-       <string/>
-      </property>
-     </widget>
+     <widget class="QComboBox" name="comPorts"/>
     </item>
     <item row="9" column="0" colspan="8">
      <widget class="Line" name="line_3">
@@ -148,9 +144,9 @@
      <widget class="QLineEdit" name="valueValBox"/>
     </item>
     <item row="0" column="0">
-     <widget class="QLabel" name="socketFileLabel">
+     <widget class="QLabel" name="serialPortLabel">
       <property name="text">
-       <string>Socket file:</string>
+       <string>Serial port:</string>
       </property>
      </widget>
     </item>
@@ -421,7 +417,7 @@
   </widget>
  </widget>
  <tabstops>
-  <tabstop>domainSocketLine</tabstop>
+  <tabstop>comPorts</tabstop>
   <tabstop>startListeningButton</tabstop>
   <tabstop>saveStateButton</tabstop>
   <tabstop>ramAddrBox</tabstop>
