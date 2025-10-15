@@ -106,56 +106,81 @@ bool TesterSim::fillReceiveBuffer()
 
 bool TesterSim::findCompletePacket(uint8_t* packetBuf, int& packetSize)
 {
-  // Need at least 3 bytes to determine packet size
-  if (m_receiveBuffer.available() < 3) return false;
-  
-  // Peek at the first 3 bytes to determine packet size (non-destructive)
-  uint8_t header[3];
-  int headerBytes = m_receiveBuffer.peek(header, 3);
-  if (headerBytes != 3) return false;
-  
-  // Validate header bytes for reframing
-  uint8_t prefix = header[0];
-  uint8_t lengthHi = header[1];
-  uint8_t lengthLo = header[2];
-  
-  // SD2 prefix "P" 0x50
-  // SDX prefix "WAY" 0x57
+  // If there is nothing to inspect, bail early
+  int available = m_receiveBuffer.available();
+  if (available <= 0) return false;
+
+  // Determine expected prefix based on tester type
   uint8_t expectedPrefix = 0;
   if (m_testerType == TesterType::SD2)
   {
-    expectedPrefix = 0x50;
-  } else if (m_testerType == TesterType::xBOARD)
+    expectedPrefix = 0x50; // 'P'
+  }
+  else if (m_testerType == TesterType::xBOARD)
   {
-    expectedPrefix = 0x57;
+    expectedPrefix = 0x57; // 'WAY'
   }
 
-  if (prefix != expectedPrefix )
+  // Peek as much as available (bounded by the circular buffer capacity)
+  uint8_t temp[CIRCULAR_BUFFER_SIZE];
+  const int toPeek = (available < CIRCULAR_BUFFER_SIZE) ? available : CIRCULAR_BUFFER_SIZE;
+  const int peeked = m_receiveBuffer.peek(temp, toPeek);
+  if (peeked <= 0) return false;
+
+  // Scan for a valid start byte and header
+  int maxAdvance = 0; // how many bytes we can safely discard (shift) if no full packet is found
+  for (int i = 0; i < peeked; ++i)
   {
-    // Invalid prefix byte - reset buffer to reframe
-    emit logMsg(QString("Invalid prefix byte 0x%1 - resetting buffer for reframing").arg(prefix, 2, 16, QChar('0')));
-    m_receiveBuffer.clear();
-    return false;
+    if (temp[i] != expectedPrefix)
+    {
+      // not a start byte, we can skip it
+      maxAdvance = i + 1;
+      continue;
+    }
+
+    // Found a potential start. Ensure we have at least the 3-byte header
+    if (i + 3 > peeked)
+    {
+      // Keep the potential prefix for next time; drop bytes before it
+      if (i > 0) m_receiveBuffer.advance(i);
+      return false;
+    }
+
+    const uint8_t lengthHi = temp[i + 1];
+    const uint8_t lengthLo = temp[i + 2];
+
+    // Total packet size is prefix + length (16-bit)
+    const uint16_t length = (static_cast<uint16_t>(lengthHi) << 8) | lengthLo;
+    packetSize = static_cast<int>(length) + 1;
+
+    // Sanity check minimum size (prefix + 2 length bytes + 4 payload bytes)
+    if (packetSize < 7)
+    {
+      // Invalid size at this prefix; skip this prefix and continue searching
+      emit logMsg(QString("Invalid packet size %1 at prefix; shifting to next candidate").arg(packetSize));
+      maxAdvance = i + 1;
+      continue;
+    }
+
+    // If we don't yet have the full packet in the buffer, keep the prefix and wait for more
+    if (i + packetSize > peeked)
+    {
+      if (i > 0) m_receiveBuffer.advance(i);
+      return false;
+    }
+
+    // We have a complete packet starting at offset i. Shift buffer up to i, then extract.
+    if (i > 0) m_receiveBuffer.advance(i);
+    return extractPacketFromBuffer(packetBuf, packetSize);
   }
-  
-  // Calculate full packet size: length bytes + prefix byte
-  // Length is stored as 16-bit value in bytes 1 and 2
-  uint16_t length = (static_cast<uint16_t>(lengthHi) << 8) | lengthLo;
-  packetSize = length + 1; // +1 for the prefix byte
-  
-  // Validate minimum packet size (7 bytes: prefix + 2 length bytes + 4 payload bytes)
-  if (packetSize < 7)
+
+  // No valid prefix found in the peeked data. Discard scanned bytes to reframe.
+  if (maxAdvance > 0)
   {
-    emit logMsg(QString("Invalid packet size %1 (minimum 7 bytes) - resetting buffer for reframing").arg(packetSize));
-    m_receiveBuffer.clear();
-    return false;
+    emit logMsg(QString("Invalid data encountered - shifting buffer by %1 bytes to reframe").arg(maxAdvance));
+    m_receiveBuffer.advance(maxAdvance);
   }
-  
-  // Check if we have enough data for the complete packet
-  if (m_receiveBuffer.available() < packetSize) return false;
-  
-  // Extract the complete packet
-  return extractPacketFromBuffer(packetBuf, packetSize);
+  return false;
 }
 
 bool TesterSim::extractPacketFromBuffer(uint8_t* packetBuf, int packetSize)
