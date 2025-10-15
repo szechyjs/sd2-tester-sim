@@ -9,6 +9,7 @@ CONFIG += c++17
 #DEFINES += QT_DISABLE_DEPRECATED_BEFORE=0x060000    # disables all the APIs deprecated before Qt 6.0.0
 
 SOURCES += \
+    CircularBuffer.cpp \
     TesterSim.cpp \
     TesterSimModuleInfo.cpp \
     main.cpp \
@@ -16,6 +17,7 @@ SOURCES += \
     utilities.cpp
 
 HEADERS += \
+    CircularBuffer.h \
     TesterSim.h \
     simmain.h \
     utilities.h

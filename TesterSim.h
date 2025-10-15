@@ -8,6 +8,7 @@
 #include <QObject>
 #include <QString>
 #include <QSerialPort>
+#include "CircularBuffer.h"
 
 constexpr int CHKSUM_BUF_SIZE = 110;
 constexpr int DEFAULT_SNAPSHOT_SIZE = 16;
@@ -53,6 +54,7 @@ signals:
 private:
   bool m_shutdown = false;
   QSerialPort m_port;
+  CircularBuffer m_receiveBuffer;
   uint8_t m_inbuf[128];
   uint8_t m_outbuf[128];
   uint8_t m_checksumBuf[CHKSUM_BUF_SIZE];
@@ -81,6 +83,11 @@ private:
   void chdir(const std::string& dir);
   void addToFile(const std::string& name, int numBytes);
   void emitConsecutiveWriteToFileSignal();
+  
+  // New circular buffer and packet processing methods
+  bool fillReceiveBuffer();
+  bool findCompletePacket(uint8_t* packetBuf, int& packetSize);
+  bool extractPacketFromBuffer(uint8_t* packetBuf, int packetSize);
 
   static std::map<uint8_t,std::function<void(const uint8_t*,uint8_t*,TesterSim*)>> s_commandProcs;
   static const std::unordered_map<int,ProtocolType> s_protocols;

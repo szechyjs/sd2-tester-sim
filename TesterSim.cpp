@@ -42,6 +42,7 @@ TesterSim::TesterSim(QObject* parent) : QObject(parent)
   memset(m_outbuf, 0, 128);
   memset(m_checksumBuf, 0, CHKSUM_BUF_SIZE);
   memset(m_lastInbuf, 0, 128);
+  m_receiveBuffer.clear();
   for (int i = 0; i < 16; i++)
   {
     m_applRun[i] = false;
@@ -70,6 +71,65 @@ int TesterSim::readBytes(uint8_t* buf, int count)
   }
 
   return m_port.read(reinterpret_cast<char*>(buf), count);
+}
+
+bool TesterSim::fillReceiveBuffer()
+{
+  if (m_shutdown) return false;
+  
+  // Read available data from serial port
+  int bytesAvailable = m_port.bytesAvailable();
+  if (bytesAvailable <= 0) return true;  // No data available, but not an error
+  
+  // Limit read size to prevent buffer overflow
+  int maxReadSize = CIRCULAR_BUFFER_SIZE - m_receiveBuffer.available();
+  if (maxReadSize <= 0) return true;  // Buffer is full
+  
+  int readSize = (bytesAvailable < maxReadSize) ? bytesAvailable : maxReadSize;
+  
+  uint8_t tempBuffer[512];  // Temporary buffer for reading from serial port
+  int bytesRead = m_port.read(reinterpret_cast<char*>(tempBuffer), readSize);
+  
+  if (bytesRead > 0)
+  {
+    m_receiveBuffer.write(tempBuffer, bytesRead);
+  }
+  
+  return true;
+}
+
+bool TesterSim::findCompletePacket(uint8_t* packetBuf, int& packetSize)
+{
+  // Need at least 3 bytes to determine packet size
+  if (m_receiveBuffer.available() < 3) return false;
+  
+  // Peek at the first 3 bytes to determine packet size (non-destructive)
+  uint8_t header[3];
+  int headerBytes = m_receiveBuffer.peek(header, 3);
+  if (headerBytes != 3) return false;
+  
+  // Calculate full packet size: header[2] + 1 (including the size byte itself)
+  packetSize = header[2] + 1;
+  
+  // Check if we have enough data for the complete packet
+  if (m_receiveBuffer.available() < packetSize) return false;
+  
+  // Extract the complete packet
+  return extractPacketFromBuffer(packetBuf, packetSize);
+}
+
+bool TesterSim::extractPacketFromBuffer(uint8_t* packetBuf, int packetSize)
+{
+  if (m_receiveBuffer.available() < packetSize) return false;
+  
+  // Read the complete packet
+  int bytesRead = m_receiveBuffer.read(packetBuf, packetSize);
+  if (bytesRead != packetSize) return false;
+  
+  // Advance the buffer to mark this packet as consumed
+  m_receiveBuffer.advance(packetSize);
+  
+  return true;
 }
 
 bool TesterSim::sendReply(bool print)
@@ -192,23 +252,22 @@ void TesterSim::emitConsecutiveWriteToFileSignal()
 bool TesterSim::listen()
 {
   bool status = true;
-  int fullPacketSize = 0;
+  int packetSize = 0;
 
   while (status && !m_shutdown)
   {
-    // Read the first 3 bytes. The first byte (which we'll call the prefix)
-    // is fixed to be one of a couple possible values, depending on the mode
-    // of the Windows diagnostic software (Ferrari vs. Maserati).
-    // The second and third bytes, taken together, are a big-endian 16-bit
-    // count of the bytes in the payload for this message, including those
-    // two bytes themselves but not including the prefix byte.
-    if (readBytes(m_inbuf, 3) == 3)
+    // Fill the receive buffer with available serial data
+    if (!fillReceiveBuffer())
     {
-      fullPacketSize = m_inbuf[2] + 1;
-
-      if ((fullPacketSize >= 7) &&
-          (readBytes(m_inbuf + 3, fullPacketSize - 3) ==
-            (fullPacketSize - 3)))
+      status = false;
+      break;
+    }
+    
+    // Try to find complete packets in the buffer
+    while (findCompletePacket(m_inbuf, packetSize))
+    {
+      // Validate packet size
+      if (packetSize >= 7)
       {
         if (shouldDisplayPacket(m_inbuf))
         {
@@ -219,24 +278,21 @@ bool TesterSim::listen()
         {
           status = processBuf(false);
         }
+        
+        if (!status) break;  // Exit if processing failed
       }
       else
       {
-        if (fullPacketSize < 7)
-        {
-          emit logMsg(QString("Error: reported packet size of %1 too small").arg(fullPacketSize));
-        }
-        else
-        {
-          emit logMsg("Error receiving packet body");
-        }
+        emit logMsg(QString("Error: reported packet size of %1 too small").arg(packetSize));
         status = false;
+        break;
       }
     }
-    else
+    
+    // If no complete packet found, wait a bit before checking again
+    if (m_receiveBuffer.available() < 3)
     {
-      // failed to read the first three bytes of the packet
-      status = false;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
   }
   return status;
