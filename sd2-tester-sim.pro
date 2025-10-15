@@ -10,6 +10,7 @@ CONFIG += c++17
 
 SOURCES += \
     CircularBuffer.cpp \
+    Packet.cpp \
     TesterSim.cpp \
     TesterSimModuleInfo.cpp \
     main.cpp \
@@ -18,7 +19,9 @@ SOURCES += \
 
 HEADERS += \
     CircularBuffer.h \
+    Packet.h \
     TesterSim.h \
+    TesterType.h \
     simmain.h \
     utilities.h
 

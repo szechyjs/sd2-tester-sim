@@ -9,6 +9,8 @@
 #include <QString>
 #include <QSerialPort>
 #include "CircularBuffer.h"
+#include "TesterType.h"
+#include "Packet.h"
 
 constexpr int CHKSUM_BUF_SIZE = 110;
 constexpr int DEFAULT_SNAPSHOT_SIZE = 16;
@@ -29,14 +31,6 @@ enum class ProtocolType
   BilsteinSuspension
 };
 
-enum class TesterType
-{
-    SD2,
-    xBOARD,
-    F458CHP,
-    F458GT3,
-    F599XX
-};
 
 class TesterSim : public QObject
 {
@@ -67,6 +61,8 @@ private:
   TesterType m_testerType = TesterType::SD2;
   uint8_t m_inbuf[128];
   uint8_t m_outbuf[128];
+  Packet m_inpacket;
+  Packet m_outpacket;
   uint8_t m_checksumBuf[CHKSUM_BUF_SIZE];
   uint8_t m_lastInbuf[128];
   QString m_curDir;
@@ -85,11 +81,11 @@ private:
   QVector<quint8>* m_curFileContents = nullptr;
 
   void log(const QString& line);
-  bool shouldDisplayPacket(const uint8_t* buf);
-  void printPacket(const uint8_t* buf);
+  bool shouldDisplayPacket(Packet packet);
+  void printPacket(Packet packet);
   int readBytes(uint8_t* buf, int count);
-  bool sendReply(bool print);
-  bool processBuf(bool print);
+  bool sendReply(Packet packet, bool print);
+  bool processBuf(Packet packet, bool print);
   void chdir(const std::string& dir);
   void addToFile(const std::string& name, int numBytes);
   void emitConsecutiveWriteToFileSignal();
@@ -99,40 +95,40 @@ private:
   bool findCompletePacket(uint8_t* packetBuf, int& packetSize);
   bool extractPacketFromBuffer(uint8_t* packetBuf, int packetSize);
 
-  static std::map<uint8_t,std::function<void(const uint8_t*,uint8_t*,TesterSim*)>> s_commandProcs;
+  static std::map<uint8_t,std::function<void(const Packet&,Packet&,TesterSim*)>> s_commandProcs;
   static const std::unordered_map<int,ProtocolType> s_protocols;
   static const std::unordered_map<int,std::vector<uint8_t>> s_isoBytes;
   static const std::unordered_map<int,std::vector<uint8_t>> s_moduleExtraInitInfo;
 
-  static void process01TabletInfo(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process02SerialNo(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process09(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process0AWorkshopData(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process0BStartApplModGest(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process11DoSlowInit(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process12GetISOKeyword(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process13CommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process15DisplayString(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process1C(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process1ECloseFile(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process20OpenFileForWriting(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process21WriteToFile(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process23OpenFileForReading(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process24ReadFromFile(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process25ChecksumFile(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process2AChdir(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process2BGetNextDirEntry(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process3AGetDateTime(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process3DEraseFlash(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process60SiliconNumber(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process61SetBoard(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process62SendReset(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
-  static void process63TesterStatus(const uint8_t* inbuf, uint8_t* outbuf, TesterSim*);
+  static void process01TabletInfo(const Packet& in, Packet &out, TesterSim*);
+  static void process02SerialNo(const Packet& in, Packet &out, TesterSim*);
+  static void process09(const Packet& in, Packet& out, TesterSim*);
+  static void process0AWorkshopData(const Packet& in, Packet &out, TesterSim*);
+  static void process0BStartApplModGest(const Packet& in, Packet &out, TesterSim*);
+  static void process11DoSlowInit(const Packet& in, Packet& out, TesterSim*);
+  static void process12GetISOKeyword(const Packet& in, Packet& out, TesterSim*);
+  static void process13CommandToECU(const Packet& in, Packet& out, TesterSim*);
+  static void process15DisplayString(const Packet& in, Packet& out, TesterSim*);
+  static void process1C(const Packet &in, Packet& out, TesterSim*);
+  static void process1ECloseFile(const Packet& in, Packet& out, TesterSim*);
+  static void process20OpenFileForWriting(const Packet& in, Packet &out, TesterSim*);
+  static void process21WriteToFile(const Packet& in, Packet& out, TesterSim*);
+  static void process23OpenFileForReading(const Packet &in, Packet &out, TesterSim*);
+  static void process24ReadFromFile(const Packet& in, Packet& out, TesterSim*);
+  static void process25ChecksumFile(const Packet& in, Packet& out, TesterSim*);
+  static void process2AChdir(const Packet &in, Packet &out, TesterSim*);
+  static void process2BGetNextDirEntry(const Packet& in, Packet& out, TesterSim*);
+  static void process3AGetDateTime(const Packet& in, Packet& out, TesterSim*);
+  static void process3DEraseFlash(const Packet& in, Packet& out, TesterSim*);
+  static void process60SiliconNumber(const Packet& in, Packet& out, TesterSim*);
+  static void process61SetBoard(const Packet& in, Packet& out, TesterSim*);
+  static void process62SendReset(const Packet& in, Packet& out, TesterSim*);
+  static void process63TesterStatus(const Packet& in, Packet& out, TesterSim*);
 
-  static void processKWP71CommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim, bool hasVerbosePayload);
-  static void processFIAT9141CommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim, bool hasVerbosePayload);
-  static void processMarelli1AFCommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim, bool hasVerbosePayload);
-  static void processBoschAlarmCommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim, bool hasVerbosePayload);
-  static void processBilsteinSuspensionCommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim, bool hasVerbosePayload);
+  static void processKWP71CommandToECU(const Packet& in, Packet& out, TesterSim* sim, bool hasVerbosePayload);
+  static void processFIAT9141CommandToECU(const Packet& in, Packet& out, TesterSim* sim, bool hasVerbosePayload);
+  static void processMarelli1AFCommandToECU(const Packet& in, Packet& out, TesterSim* sim, bool hasVerbosePayload);
+  static void processBoschAlarmCommandToECU(const Packet& in, Packet& out, TesterSim* sim, bool hasVerbosePayload);
+  static void processBilsteinSuspensionCommandToECU(const Packet& in, Packet& out, TesterSim* sim, bool hasVerbosePayload);
 };
 

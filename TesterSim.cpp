@@ -11,7 +11,7 @@
 #include <QDataStream>
 #include <QFileInfo>
 
-std::map<uint8_t,std::function<void(const uint8_t*,uint8_t*,TesterSim*)>> TesterSim::s_commandProcs =
+std::map<uint8_t,std::function<void(const Packet&,Packet&,TesterSim*)>> TesterSim::s_commandProcs =
 {
   { 0x00, TesterSim::process63TesterStatus },
   { 0x01, TesterSim::process01TabletInfo },
@@ -211,106 +211,57 @@ bool TesterSim::extractPacketFromBuffer(uint8_t* packetBuf, int packetSize)
   return true;
 }
 
-bool TesterSim::sendReply(bool print)
+bool TesterSim::sendReply(Packet packet, bool print)
 {
   bool status = true;
-  if (m_outbuf[2] != 0)
+  if (packet.totalLength() != 0)
   {
-    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    uint16_t len = 0;
-    if (m_testerType == TesterType::xBOARD)
-    {
-      // xBOARD: length includes entire message including header and checksum
-      len = static_cast<uint16_t>((m_outbuf[3] << 8) | m_outbuf[4]);
-    }
-    else
-    {
-      // SD2: len = prefix(1) + length(low in [2], high in [1] but historically 0)
-      // For backward compatibility keep the existing low-byte based total
-      len = static_cast<uint16_t>(m_outbuf[2] + 1);
-    }
+    uint16_t len = packet.totalLength();
+
     if (print)
     {
-      printPacket(m_outbuf);
+      printPacket(packet);
     }
 
-    const int wroteBytes = m_port.write(reinterpret_cast<char*>(m_outbuf), len);
+    const int wroteBytes = m_port.write(reinterpret_cast<char*>(packet.serialize().data()), len);
     m_port.waitForBytesWritten();
     status = (wroteBytes == len);
   }
   return status;
 }
 
-bool TesterSim::processBuf(bool print)
+bool TesterSim::processBuf(Packet packet, bool print)
 {
   bool status = false;
-  const bool isXBoard = (m_testerType == TesterType::xBOARD);
-  uint16_t size = 0;
-  int commandIndex = 0;
+  uint16_t size = packet.totalLength();
 
-  if (isXBoard)
-  {
-    // xBOARD: header = 'W','A','Y' (3 bytes), length at [3],[4] includes header and checksum
-    size = static_cast<uint16_t>((m_inbuf[3] << 8) | m_inbuf[4]);
-    commandIndex = 7;
-  }
-  else
-  {
-    // SD2: prefix at [0], length at [1],[2] does not include prefix
-    uint16_t length = static_cast<uint16_t>((m_inbuf[1] << 8) | m_inbuf[2]);
-    size = static_cast<uint16_t>(length + 1);
-    commandIndex = 6;
-  }
-
-  const int minPacketSize = isXBoard ? 9 : 7;
-  if (size >= minPacketSize)
+  if (size >= 7) // TODO
   {
     memcpy(m_outbuf, m_inbuf, size); // tablet SW usually starts by copying the message
                                      // from the PC into the reply buffer
-    if (!isXBoard)
-    {
-      m_outbuf[0] = 'T';
-      m_outbuf[1] = 0x00; // hi byte of length
-    }
-    else
-    {
-      m_outbuf[0] = 'D';
-      m_outbuf[1] = 'E';
-      m_outbuf[2] = 'S';
-      m_outbuf[3] = 0x00; // hi byte of length
-    }
+    Packet outPacket(packet);
+
     // For xBOARD, preserve the copied header/length; response shaping handled per-command
 
     // To keep the log output cleaner, we keep track of whether we
     // received multiple consecutive Write-to-File commands.
-    if (m_inbuf[commandIndex] != 0x21)
+    if (packet.command() != 0x21)
     {
       m_lastCmdWasWriteToFile = false;
     }
 
-    if (s_commandProcs.count(m_inbuf[commandIndex]))
+    if (s_commandProcs.count(packet.command()))
     {
-      s_commandProcs.at(m_inbuf[commandIndex])(m_inbuf, m_outbuf, this);
+      s_commandProcs.at(packet.command())(packet, outPacket, this);
     }
     else
     {
-      emit logMsg(QString("Sending generic 'success' response to command msg type 0x%1").arg(m_inbuf[commandIndex], 2, 16, QChar('0')));
-      if (!isXBoard)
-      {
-        m_outbuf[2] = 7;   // total length minus prefix for SD2 reply
-        m_outbuf[7] = 1;   // success
-      }
-      else
-      {
-        const uint16_t replyLen = 10;
-        m_outbuf[3] = static_cast<uint8_t>((replyLen >> 8) & 0xFF);
-        m_outbuf[4] = static_cast<uint8_t>(replyLen & 0xFF);
-        m_outbuf[8] = 0; // success
-        // Checksum will be calculated later where appropriate
-      }
+      emit logMsg(QString("Sending generic 'success' response to command msg type 0x%1").arg(packet.command(), 2, 16, QChar('0')));
+      outPacket.setReply(true, {});
     }
-    status = sendReply(print);
+    status = sendReply(outPacket, print);
 
     // TODO: Of the ECUs that send unsolicited info immediately after the ISO
     // keyword sequence, we need to determine which of them have their ID info
@@ -344,30 +295,27 @@ void TesterSim::stopListening()
  * Determines whether the packet containing the supplied buffer should be
  * printed in its entirety.
  */
-bool TesterSim::shouldDisplayPacket(const uint8_t* buf)
+bool TesterSim::shouldDisplayPacket(Packet packet)
 {
   bool status = true;
-  const uint16_t totalLen = (m_testerType == TesterType::xBOARD)
-                            ? static_cast<uint16_t>((buf[3] << 8) | buf[4])
-                            : static_cast<uint16_t>(buf[2]);
-  if (totalLen > 0 && memcmp(buf, m_lastInbuf, totalLen) == 0)
+  const uint16_t totalLen = packet.totalLength();
+  auto buf = packet.serialize();
+  if (totalLen > 0 && memcmp(buf.data(), m_lastInbuf, totalLen) == 0)
   {
     emit lastLogMsgRepeated();
     status = false;
   }
-  if (totalLen > 0) memcpy(m_lastInbuf, buf, totalLen);
+  if (totalLen > 0) memcpy(m_lastInbuf, buf.data(), totalLen);
   return status;
 }
 
-void TesterSim::printPacket(const uint8_t* buf)
+void TesterSim::printPacket(Packet packet)
 {
   QString packetStr;
-  const uint16_t totalLen = (m_testerType == TesterType::xBOARD)
-                            ? static_cast<uint16_t>((buf[3] << 8) | buf[4])
-                            : static_cast<uint16_t>(buf[2]) + 1;
-  for (int i = 0; i < totalLen; i++)
+  auto bytes = packet.serialize();
+  for (int i = 0; i < packet.totalLength(); i++)
   {
-    packetStr += QString("%1 ").arg(buf[i], 2, 16, QChar('0'));
+    packetStr += QString("%1 ").arg(bytes[i], 2, 16, QChar('0'));
   }
   log(packetStr);
 }
@@ -394,17 +342,19 @@ bool TesterSim::listen()
     // Try to find complete packets in the buffer
     while (findCompletePacket(m_inbuf, packetSize))
     {
+      Packet packet(m_testerType);
+      packet.parse(m_inbuf, packetSize);
       // Validate packet size
       if (packetSize >= 7)
       {
-        if (shouldDisplayPacket(m_inbuf))
+        if (shouldDisplayPacket(packet))
         {
-          printPacket(m_inbuf);
-          status = processBuf(true);
+          printPacket(packet);
+          status = processBuf(packet, true);
         }
         else
         {
-          status = processBuf(false);
+          status = processBuf(packet, false);
         }
         
         if (!status) break;  // Exit if processing failed
@@ -426,112 +376,113 @@ bool TesterSim::listen()
   return status;
 }
 
-void TesterSim::process01TabletInfo(const uint8_t* /*inbuf*/, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process01TabletInfo(const Packet& /*inbuf*/, Packet &out, TesterSim* sim)
 {
   sim->log("Request for Tester info");
-  outbuf[1] = 0;
-  outbuf[2] = 0x18;
-  outbuf[7] = 0x03; // sys loader maj version
-  outbuf[8] = 0x01; // sys loader min version
-  outbuf[9] = 0x25; // sys loader date (day)
-  outbuf[10] = 0x09; // sys loader date (month)
-  outbuf[11] = 0x19; // sys loader date (decade)
-  outbuf[12] = 0x98; // sys loader date (year)
-  outbuf[13] = 0x05; // OS maj version
-  outbuf[14] = 0x05; // OS min version
-  outbuf[15] = 0x04; // OS date (day)
-  outbuf[16] = 0x03; // OS date (month)
-  outbuf[17] = 0x14; // OS date (decade)
-  outbuf[18] = 0x19; // OS date (year)
-  outbuf[19] = 0x00; // free space on flash storage (32 bit val)
-  outbuf[20] = 0x23;
-  outbuf[21] = 0x33;
-  outbuf[22] = 0x33;
-  outbuf[23] = 0;   // serial num hi
-  outbuf[24] = 212; // serial num lo
+  std::vector<uint8_t> outbuf = {
+    0x03, // sys loader maj version
+    0x01, // sys loader min version
+    0x25, // sys loader date (day)
+    0x09, // sys loader date (month)
+    0x19, // sys loader date (decade)
+    0x98, // sys loader date (year)
+    0x05, // OS maj version
+    0x05, // OS min version
+    0x04, // OS date (day)
+    0x03, // OS date (month)
+    0x14, // OS date (decade)
+    0x19, // OS date (year)
+    0x00, // free space on flash storage (32 bit val)
+    0x23,
+    0x33,
+    0x33,
+    0,   // serial num hi
+    212, // serial num lo
+  };
+  out.setReply(true, outbuf);
 }
 
-void TesterSim::process02SerialNo(const uint8_t* /*inbuf*/, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process02SerialNo(const Packet& /*in*/, Packet& out, TesterSim* sim)
 {
   sim->log("Request for Tester serial no.");
-  outbuf[2] = 8;
-  outbuf[7] = 0;   // hi byte
-  outbuf[8] = 212; // lo byte
+  std::vector<uint8_t> outbuf = {
+    0,   // hi byte
+    212, // lo byte
+  };
+  out.setReply(true, outbuf);
 }
 
-void TesterSim::process09(const uint8_t* /*inbuf*/, uint8_t* outbuf, TesterSim* /*sim*/)
+void TesterSim::process09(const Packet& /*in*/, Packet& out, TesterSim* /*sim*/)
 {
-  outbuf[1] = 0;
-  outbuf[2] = 7;
-  outbuf[7] = 0x10;
+  out.setReply(true, {0x10});
 }
 
-void TesterSim::process0AWorkshopData(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process0AWorkshopData(const Packet& in, Packet& out, TesterSim* sim)
 {
   sim->log("Request for workshop data");
-  outbuf[2] = 0x76;
-  outbuf[7] = 1;
-  outbuf[8] = inbuf[7];
+  std::vector<uint8_t> outbuf(111);
+  //outbuf[2] = 0x76;
+  //outbuf[7] = 1;
+  outbuf[0] = in.data()[1];
   char c = 'a';
-  int pos = 9;
-  while (pos < 19)
+  int pos = 0;
+  while (pos < 11)
   {
     outbuf[pos++] = c++;
   }
   outbuf[pos++] = '\0';
-  while (pos < 29)
+  while (pos < 21)
   {
     outbuf[pos++] = c++;
   }
   outbuf[pos++] = '\0';
-  while (pos < 0x77)
+  while (pos < 111)
   {
     outbuf[pos++] = '\0';
   }
+  out.setReply(true, outbuf);
 }
 
-void TesterSim::process0BStartApplModGest(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process0BStartApplModGest(const Packet& in, Packet& out, TesterSim* sim)
 {
-  const uint16_t ecuId = (inbuf[7] * 0x100) + inbuf[8];
-  const uint8_t pipeNum = inbuf[9];
+  const uint16_t ecuId = (in.data()[0] * 0x100) + in.data()[1];
+  const uint8_t pipeNum = in.data()[2];
   sim->log(QString("Starting _applModGest%1 thread on pipe %2").arg(ecuId, 4, 10, QChar('0')).arg(pipeNum));
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
   sim->m_applRun[pipeNum] = true;
   sim->m_currentECUID = ecuId;
-  outbuf[2] = 7;
-  outbuf[7] = 1;
+  out.setReply(true, {});
 }
 
-void TesterSim::process11DoSlowInit(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process11DoSlowInit(const Packet& in, Packet& out, TesterSim* sim)
 {
   std::this_thread::sleep_for(std::chrono::seconds(1));
 
-  const uint8_t ecuAddr = inbuf[7];
-  if (inbuf[2] >= 8)
+  const uint8_t ecuAddr = in.data()[0];
+  if (in.data().size() >= 2)
   {
-    sim->log(QString("Do 5-baud slow init for ECU address 0x%1 with %2 bytes expected in response sequence").arg(ecuAddr, 2, 16, QChar('0')).arg(inbuf[8]));
+    sim->log(QString("Do 5-baud slow init for ECU address 0x%1 with %2 bytes expected in response sequence").arg(ecuAddr, 2, 16, QChar('0')).arg(in.data()[1]));
   }
   else
   {
     sim->log(QString("Do 5-baud slow init for ECU address 0x%1").arg(ecuAddr, 2, 16, QChar('0')));
   }
 
-  process12GetISOKeyword(inbuf, outbuf, sim);
+  process12GetISOKeyword(in, out, sim);
 }
 
-void TesterSim::process12GetISOKeyword(const uint8_t* /*inbuf*/, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process12GetISOKeyword(const Packet& /*in*/, Packet& out, TesterSim* sim)
 {
   if (sim->s_isoBytes.count(sim->m_currentECUID))
   {
     const std::vector<uint8_t>& isoBytes = sim->s_isoBytes.at(sim->m_currentECUID);
     const int isoByteCount = isoBytes.size();
     QString replyLogMsg = QString("Replying with keyword sequence of %1 bytes:").arg(isoByteCount);
-    outbuf[2] = 7 + isoByteCount;
-    outbuf[7] = 1;
+    std::vector<uint8_t> outbuf(isoByteCount);
 
     for (int i = 0; i < isoByteCount; i++)
     {
-      outbuf[8 + i] = isoBytes[i];
+      outbuf[i] = isoBytes[i];
       replyLogMsg += QString(" %1").arg(isoBytes[i], 2, 16, QChar('0'));
     }
 
@@ -542,16 +493,17 @@ void TesterSim::process12GetISOKeyword(const uint8_t* /*inbuf*/, uint8_t* outbuf
     if (sim->s_moduleExtraInitInfo.count(sim->m_currentECUID))
     {
       const int extraDataLen = sim->s_moduleExtraInitInfo.at(sim->m_currentECUID).size();
-      outbuf[2] = 7 + isoByteCount + extraDataLen;
-      memcpy(&outbuf[8 + isoByteCount], sim->s_moduleExtraInitInfo.at(sim->m_currentECUID).data(), extraDataLen);
+      outbuf.resize(isoByteCount + extraDataLen);
+      std::copy_n(sim->s_moduleExtraInitInfo.at(sim->m_currentECUID).data(), extraDataLen, &outbuf[isoByteCount]);
 
       printf("slow init reply msg:");
-      for (int i = 0; i <= outbuf[2]; i++)
+      for (size_t i = 0; i <= outbuf.size(); i++)
       {
         printf(" %02X", outbuf[i]);
       }
       printf("\n");
     }
+    out.setReply(true, outbuf);
 
     sim->log(replyLogMsg);
   }
@@ -561,7 +513,7 @@ void TesterSim::process12GetISOKeyword(const uint8_t* /*inbuf*/, uint8_t* outbuf
   }
 }
 
-void TesterSim::process13CommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process13CommandToECU(const Packet& in, Packet& out, TesterSim* sim)
 {
   const int currentECU = sim->m_currentECUID;
   if (s_protocols.count(currentECU))
@@ -582,27 +534,27 @@ void TesterSim::process13CommandToECU(const uint8_t* inbuf, uint8_t* outbuf, Tes
     
     // The data is this command packet is assumed to verbosely contain an ECU protocol block
     // if the packet has 9 or more bytes AND there is 0x00 in position 07.
-    const bool hasVerbosePayload = ((inbuf[1] > 0) || (inbuf[2] > 8)) && (inbuf[7] == 0x00);
+    const bool hasVerbosePayload = in.data().size() > 2 && in.data()[0] == 0x00;
 
     if (proto == ProtocolType::KWP71)
     {
-      processKWP71CommandToECU(inbuf, outbuf, sim, hasVerbosePayload);
+      processKWP71CommandToECU(in, out, sim, hasVerbosePayload);
     }
     else if (proto == ProtocolType::FIAT9141)
     {
-      processFIAT9141CommandToECU(inbuf, outbuf, sim, hasVerbosePayload);
+      processFIAT9141CommandToECU(in, out, sim, hasVerbosePayload);
     }
     else if (proto == ProtocolType::Marelli1AF)
     {
-      processMarelli1AFCommandToECU(inbuf, outbuf, sim, hasVerbosePayload);
+      processMarelli1AFCommandToECU(in, out, sim, hasVerbosePayload);
     }
     else if (proto == ProtocolType::BoschAlarm)
     {
-      processBoschAlarmCommandToECU(inbuf, outbuf, sim, hasVerbosePayload);
+      processBoschAlarmCommandToECU(in, out, sim, hasVerbosePayload);
     }
     else if (proto == ProtocolType::BilsteinSuspension)
     {
-      processBilsteinSuspensionCommandToECU(inbuf, outbuf, sim, hasVerbosePayload);
+      processBilsteinSuspensionCommandToECU(in, out, sim, hasVerbosePayload);
     }
   }
   else
@@ -617,39 +569,42 @@ void TesterSim::process13CommandToECU(const uint8_t* inbuf, uint8_t* outbuf, Tes
  * omitted from the input block due to SD2 framing; this is indicated by the
  * state of the hasVerbosePayload flag.
  */
-void TesterSim::processKWP71CommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim, bool hasVerbosePayload)
+void TesterSim::processKWP71CommandToECU(const Packet& in, Packet& out, TesterSim* sim, bool hasVerbosePayload)
 {
-  const uint8_t blockTitle = hasVerbosePayload ? inbuf[10] : inbuf[7];
+  const uint8_t blockTitle = hasVerbosePayload ? in.data()[3] : in.data()[0];
 
   if (blockTitle == 0x00) // Req ID code
   {
-    outbuf[2] = 16;    // overall message size (minus prefix byte)
-    outbuf[7] = 1;     // 'success' indicator
-    outbuf[8] = 8;     // number of bytes following
-    outbuf[9] = 0xF6;  // KWP71 response title with ASCII/ID data
-    outbuf[10] = 0x31;
-    outbuf[11] = 0x31;
-    outbuf[12] = 0x32;
-    outbuf[13] = 0x33;
-    outbuf[14] = 0x35;
-    outbuf[15] = 0x38;
-    outbuf[16] = 0x03;
+    std::vector<uint8_t> outbuf = {
+      8,     // number of bytes following
+      0xF6,  // KWP71 response title with ASCII/ID data
+      0x31,
+      0x31,
+      0x32,
+      0x33,
+      0x35,
+      0x38,
+      0x03,
+    };
+    out.setReply(true, outbuf);
   }
   else if (blockTitle == 0x01) // Read RAM
   {
-    const uint8_t count = hasVerbosePayload ? inbuf[11] : inbuf[8];
-    const uint16_t addr = hasVerbosePayload ? (((uint16_t)inbuf[12] * 0x100) + inbuf[13]) : (((uint16_t)inbuf[9] * 0x100) + inbuf[10]);
+    const uint8_t count = hasVerbosePayload ? in.data()[4] : in.data()[1];
+    const uint16_t addr = hasVerbosePayload ? (((uint16_t)in.data()[5] * 0x100) + in.data()[6]) : (((uint16_t)in.data()[2] * 0x100) + in.data()[3]);
     if (sim->m_ramData.count(addr) == 0)
     {
       sim->m_ramData[addr] = 0;
     }
 
-    outbuf[2] = count + 10;
-    outbuf[7] = 1;          // indicate success
-    outbuf[8] = count + 2;  // number of bytes that follow (response from ECU)
-    outbuf[9] = 0xFD;       // KWP71 response type to request 01
-    outbuf[10] = sim->m_ramData[addr];
-    outbuf[11] = 0x03;      // end-of-packet marker
+    std::vector<uint8_t> outbuf = {
+      static_cast<uint8_t>(count + 2),  // number of bytes that follow (response from ECU)
+      0xFD,       // KWP71 response type to request 01
+      sim->m_ramData[addr],
+      // TODO: should there be more here?
+      0x03,      // end-of-packet marker
+    };
+    out.setReply(true, outbuf);
   }
   else if (blockTitle == 0x07) // read trouble codes
   {
@@ -662,19 +617,19 @@ void TesterSim::processKWP71CommandToECU(const uint8_t* inbuf, uint8_t* outbuf, 
     }
     const uint8_t numFaultCodeBytes = sim->m_errorMemory.size();
 
-    outbuf[2] = 8 + numFaultCodeBytes;
-    outbuf[7] = 1;
-    outbuf[8] = numFaultCodeBytes;
+    std::vector<uint8_t> outbuf(numFaultCodeBytes + 1);
+
+    outbuf[0] = numFaultCodeBytes;
     for (uint8_t errorBytePos = 0; errorBytePos < numFaultCodeBytes; errorBytePos++)
     {
-      outbuf[9 + errorBytePos] = sim->m_errorMemory[errorBytePos];
+      outbuf[1 + errorBytePos] = sim->m_errorMemory[errorBytePos];
     }
+    out.setReply(true, outbuf);
   }
   else
   {
     sim->log("Warning: unhandled KWP71 command");
-    outbuf[2] = 7;
-    outbuf[7] = 1;
+    out.setReply(true, {});
   }
 }
 
@@ -684,45 +639,48 @@ void TesterSim::processKWP71CommandToECU(const uint8_t* inbuf, uint8_t* outbuf, 
  * omitted from the input block due to SD2 framing; this is indicated by the
  * state of the hasVerbosePayload flag.
  */
-void TesterSim::processFIAT9141CommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim, bool hasVerbosePayload)
+void TesterSim::processFIAT9141CommandToECU(const Packet& in, Packet& out, TesterSim* sim, bool hasVerbosePayload)
 {
-  const uint8_t blockTitle = hasVerbosePayload ? inbuf[9] : inbuf[7];
+  const uint8_t blockTitle = hasVerbosePayload ? in.data()[2] : in.data()[0];
 
   if (blockTitle == 0x00) // Req ID code
   {
-    outbuf[2] = 16;
-    outbuf[7] = 1;
-    outbuf[8] = 8;
-    outbuf[9] = 0xF6;
-    outbuf[10] = 0x31;
-    outbuf[11] = 0x31;
-    outbuf[12] = 0x32;
-    outbuf[13] = 0x33;
-    outbuf[14] = 0x35;
-    outbuf[15] = 0x38;
-    outbuf[16] = 0x03;
+    std::vector<uint8_t> outbuf = {
+      8,
+      0xF6,
+      0x31,
+      0x31,
+      0x32,
+      0x33,
+      0x35,
+      0x38,
+      0x03,
+    };
+    out.setReply(true, outbuf);
   }
   else if (blockTitle == 0x01) // Read RAM
   {
-    const uint8_t count = hasVerbosePayload ? inbuf[10] : inbuf[8];
-    const uint16_t addr = hasVerbosePayload ? (((uint16_t)inbuf[11] * 0x100) + inbuf[12]) : (((uint16_t)inbuf[9] * 0x100) + inbuf[10]);
+    const uint8_t count = hasVerbosePayload ? in.data()[3] : in.data()[1];
+    const uint16_t addr = hasVerbosePayload ? (((uint16_t)in.data()[4] * 0x100) + in.data()[5]) : (((uint16_t)in.data()[2] * 0x100) + in.data()[3]);
     if (sim->m_ramData.count(addr) == 0)
     {
       sim->m_ramData[addr] = 0;
     }
 
-    outbuf[2] = count + 10;
-    outbuf[7] = 1;          // indicate success
-    outbuf[8] = count + 2;  // number of bytes that follow (response from ECU)
-    outbuf[9] = 0xFD;       // KWP71 response type to request 01
-    outbuf[10] = sim->m_ramData[addr];
-    outbuf[11] = 0x03;      // end-of-packet marker
+    std::vector<uint8_t> outbuf = {
+
+      static_cast<uint8_t>(count + 2),  // number of bytes that follow (response from ECU)
+      0xFD,       // KWP71 response type to request 01
+      sim->m_ramData[addr],
+      // TODO: should there be more here?
+      0x03,      // end-of-packet marker
+    };
+    out.setReply(true, outbuf);
   }
   else
   {
     sim->log("Warning: unhandled FIAT9141 command");
-    outbuf[2] = 7;
-    outbuf[7] = 1;
+    out.setReply(true, {});
   }
 }
 
@@ -732,94 +690,106 @@ void TesterSim::processFIAT9141CommandToECU(const uint8_t* inbuf, uint8_t* outbu
  * from the input block due to SD2 framing; this is indicated by the state of
  * the hasVerbosePayload flag.
  */
-void TesterSim::processMarelli1AFCommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim, bool hasVerbosePayload)
+void TesterSim::processMarelli1AFCommandToECU(const Packet& in, Packet& out, TesterSim* sim, bool hasVerbosePayload)
 {
-  const uint8_t blockTitle = hasVerbosePayload ? inbuf[9] : inbuf[7];
+  const uint8_t blockTitle = hasVerbosePayload ? in.data()[2] : in.data()[0];
 
   if (blockTitle == 0x51) // request for ID info
   {
-    outbuf[2] = 24;
-    outbuf[7] = 1;
-    outbuf[8] = 16;
-    outbuf[9] = 0xAE; // ID of reply to request for info
-    outbuf[10] = 0xAA; // normally sync bytes for 1AF protocol, but SD2 seems to expect that
-                       // the Marelli controller for the Ferrari 355 F1 gearbox put the
-                       // "Marelli ECU code" value here
-    outbuf[11] = 0x55;
-    outbuf[12] = 0xCC;
-    outbuf[13] = 0x33;
-    outbuf[14] = 0x31; // start of Marelli SW version
-    outbuf[15] = 0x32;
-    outbuf[16] = 0x33;
-    outbuf[17] = 0x34;
-    outbuf[18] = 0x35;
-    outbuf[19] = 0x36;
-    outbuf[20] = 0x97; // SW release year in BCD
-    outbuf[21] = 0x01; // SW release month in BCD
-    outbuf[22] = 0x02; // SW release day in BCD
-    outbuf[23] = 0xAA; // ID info block terminator
-    add8BitChecksum(&outbuf[8]);
+    std::vector<uint8_t> outbuf = {
+      16,   // count
+      0xAE, // ID of reply to request for info
+      0xAA, // normally sync bytes for 1AF protocol, but SD2 seems to expect that
+            // the Marelli controller for the Ferrari 355 F1 gearbox put the
+            // "Marelli ECU code" value here
+      0x55,
+      0xCC,
+      0x33,
+      0x31, // start of Marelli SW version
+      0x32,
+      0x33,
+      0x34,
+      0x35,
+      0x36,
+      0x97, // SW release year in BCD
+      0x01, // SW release month in BCD
+      0x02, // SW release day in BCD
+      0xAA, // ID info block terminator
+      0x00, // checkusm placeholder
+    };
+    add8BitChecksum(&outbuf[0]);
+    out.setReply(true, outbuf);
   }
   else if ((blockTitle == 0x20) || (blockTitle == 0x21)) // activate actuator / stop actuation
   {
     if (blockTitle == 0x20)
     {
-      const uint8_t actuatorID = hasVerbosePayload ? inbuf[10] : inbuf[8];
-      const uint8_t actuatorParam = hasVerbosePayload ? inbuf[11] : inbuf[9];
+      const uint8_t actuatorID = hasVerbosePayload ? in.data()[3] : in.data()[2];
+      const uint8_t actuatorParam = hasVerbosePayload ? in.data()[4] : in.data()[3];
       sim->log(QString("ACTUATOR: ID 0x%1, parameter 0x%2").arg(actuatorID, 2, 16, QChar('0')).arg(actuatorParam, 2, 16, QChar('0')));
     }
+    std::vector<uint8_t> outbuf = {
+      3,
+      0x09,
+      0x00,
+      0x00,
+    };
 
-    outbuf[2] = 11;
-    outbuf[7] = 1;
-    outbuf[8] = 3;
-    outbuf[9] = 0x09;
-    add16BitChecksum(&outbuf[8]);
+    add16BitChecksum(&outbuf[0]);
+    out.setReply(true, outbuf);
   }
   else if (blockTitle == 0x01) // set diagnostic mode
   {
-    const uint8_t diagnosticMode = hasVerbosePayload ? inbuf[10] : inbuf[8];
-    outbuf[2] = 13;
-    outbuf[7] = 1;
-    outbuf[8] = 5;
-    outbuf[9] = 0x0D;
-    outbuf[10] = diagnosticMode;
-    outbuf[11] = 0x00; // fixed at 00 according to page 40 of FIAT 3.00601 PDF
-    add16BitChecksum(&outbuf[8]);
+    const uint8_t diagnosticMode = hasVerbosePayload ? in.data()[3] : in.data()[1];
+
+    std::vector<uint8_t> outbuf = {
+      5,
+      0x0D,
+      diagnosticMode,
+      0x00, // fixed at 00 according to page 40 of FIAT 3.00601 PDF
+      0x00,
+      0x00,
+    };
+    add16BitChecksum(&outbuf[0]);
+    out.setReply(true, outbuf);
   }
   else if (blockTitle == 0x30) // read RAM/ROM/EEPROM
   {
     const uint16_t startAddr = hasVerbosePayload ?
-      (static_cast<uint16_t>(inbuf[10] << 8) | (inbuf[11] & 0xff)) :
-      (static_cast<uint16_t>(inbuf[8] << 8) | (inbuf[9] & 0xff));
-    const uint8_t numBytes = hasVerbosePayload ? inbuf[12] : inbuf[10];
+      (static_cast<uint16_t>(in.data()[3] << 8) | (in.data()[4] & 0xff)) :
+      (static_cast<uint16_t>(in.data()[1] << 8) | (in.data()[2] & 0xff));
+    const uint8_t numBytes = hasVerbosePayload ? in.data()[5] : in.data()[3];
 
-    outbuf[2] = 11 + numBytes;
-    outbuf[7] = 1;
-    outbuf[8] = 3 + numBytes;
-    outbuf[9] = 0xCF;
+    std::vector<uint8_t> outbuf(3 + numBytes);
+    outbuf[0] = 3 + numBytes;
+    outbuf[1] = 0xCF;
     for (uint16_t addr = startAddr; addr < (startAddr + numBytes); addr++)
     {
-      outbuf[10 + addr] = sim->m_ramData[addr];
+      outbuf[2 + addr] = sim->m_ramData[addr];
     }
-    add16BitChecksum(&outbuf[8]);
+    add16BitChecksum(&outbuf[0]);
+    out.setReply(true, outbuf);
   }
   else if (blockTitle == 0x31) // read value
   {
-    const uint8_t valueCode = hasVerbosePayload ? inbuf[10] : inbuf[8];
+    const uint8_t valueCode = hasVerbosePayload ? in.data()[3] : in.data()[1];
 
-    outbuf[2] = 15;
-    outbuf[7] = 1;
-    outbuf[8] = 7;    // bytecount
-    outbuf[9] = 0xCE; // reply title
-    outbuf[10] = sim->m_valueData[valueCode] >> 24;
-    outbuf[11] = sim->m_valueData[valueCode] >> 16;
-    outbuf[12] = sim->m_valueData[valueCode] >> 8;
-    outbuf[13] = sim->m_valueData[valueCode] & 0xff;
-    add16BitChecksum(&outbuf[8]);
+    std::vector<uint8_t> outbuf = {
+      7,    // bytecount
+      0xCE, // reply title
+      static_cast<uint8_t>(sim->m_valueData[valueCode] >> 24),
+      static_cast<uint8_t>(sim->m_valueData[valueCode] >> 16),
+      static_cast<uint8_t>(sim->m_valueData[valueCode] >> 8),
+      static_cast<uint8_t>(sim->m_valueData[valueCode] & 0xff),
+      0x00,
+      0x00,
+    };
+    add16BitChecksum(&outbuf[0]);
+    out.setReply(true, outbuf);
   }
   else if (blockTitle == 0x32) // request for snapshot
   {
-    const uint8_t snapshotIndex = hasVerbosePayload ? inbuf[10] : inbuf[8];
+    const uint8_t snapshotIndex = hasVerbosePayload ? in.data()[3] : in.data()[1];
 
     // If we get a request for snapshot data on a page that hasn't yet been
     // explicitly populated by the GUI, resize it to the minimum page size
@@ -832,16 +802,17 @@ void TesterSim::processMarelli1AFCommandToECU(const uint8_t* inbuf, uint8_t* out
 
     const uint8_t numBytesInSnapshot = sim->m_snapshotData[snapshotIndex].size();
 
-    outbuf[2] = 11 + numBytesInSnapshot; // bytecount in the SD2 frame (including the ending checksum)
-    outbuf[7] = 1;
-    outbuf[8] = 3 + numBytesInSnapshot; // bytecount in the 1AF frame; pg. 28 of FIAT 3.00601 Marelli 1AF document seems to have an error here
-    outbuf[9] = 0xCD; // reply title
+    std::vector<uint8_t> outbuf(4 + numBytesInSnapshot);
+
+    outbuf[0] = 3 + numBytesInSnapshot; // bytecount in the 1AF frame; pg. 28 of FIAT 3.00601 Marelli 1AF document seems to have an error here
+    outbuf[1] = 0xCD; // reply title
 
     for (unsigned int i = 0; i < numBytesInSnapshot; i++)
     {
-      outbuf[10 + i] = sim->m_snapshotData[snapshotIndex][i];
+      outbuf[2 + i] = sim->m_snapshotData[snapshotIndex][i];
     }
-    add16BitChecksum(&outbuf[8]);
+    add16BitChecksum(&outbuf[0]);
+    out.setReply(true, outbuf);
   }
   else if (blockTitle == 0x50)
   {
@@ -851,22 +822,22 @@ void TesterSim::processMarelli1AFCommandToECU(const uint8_t* inbuf, uint8_t* out
     }
     const uint8_t numBytesInErrorMem = sim->m_errorMemory.size();
 
-    outbuf[2] = 11 + numBytesInErrorMem; // bytecount in the SD2 frame (including the ending checksum)
-    outbuf[7] = 1;
-    outbuf[8] = 3 + numBytesInErrorMem; // bytecount in the 1AF frame
-    outbuf[9] = 0xAF; // reply title
+    std::vector<uint8_t> outbuf(4 + numBytesInErrorMem);
+
+    outbuf[0] = 3 + numBytesInErrorMem; // bytecount in the 1AF frame
+    outbuf[1] = 0xAF; // reply title
 
     for (unsigned int i = 0; i < numBytesInErrorMem; i++)
     {
-      outbuf[10 + i] = sim->m_errorMemory[i];
+      outbuf[2 + i] = sim->m_errorMemory[i];
     }
-    add16BitChecksum(&outbuf[8]);
+    add16BitChecksum(&outbuf[0]);
+    out.setReply(true, outbuf);
   }
   else
   {
     sim->log("Warning: unhandled FIAT/Marelli 1AF command");
-    outbuf[2] = 7;
-    outbuf[7] = 1;
+    out.setReply(true, {});
   }
 }
 
@@ -877,13 +848,13 @@ void TesterSim::processMarelli1AFCommandToECU(const uint8_t* inbuf, uint8_t* out
  * WSDC32's behavior (i.e. the commands it then sends for diagnostics) will
  * change depending on the VIM version.
  */
-void TesterSim::processBoschAlarmCommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim, bool /*hasVerbosePayload*/)
+void TesterSim::processBoschAlarmCommandToECU(const Packet& in, Packet& out, TesterSim* sim, bool /*hasVerbosePayload*/)
 {
   // A typical command looks like: (... 13 01) 52 FE 01
-  if (inbuf[8] == 0x52)
+  if (in.data()[1] == 0x52)
   {
-    const uint8_t commNumberHi = inbuf[9];
-    const uint8_t commNumberLo = inbuf[10];
+    const uint8_t commNumberHi = in.data()[2];
+    const uint8_t commNumberLo = in.data()[3];
     const uint16_t commNumber = ((uint16_t)commNumberHi << 8) | commNumberLo;
 
     if (sim->m_ramData.count(commNumber) == 0)
@@ -893,22 +864,19 @@ void TesterSim::processBoschAlarmCommandToECU(const uint8_t* inbuf, uint8_t* out
 
     // This command apparently reads a single byte from the ECU, and that is the only
     // thing echoed back to WSDC32 in the payload (i.e. after byte index 07)
-    outbuf[2] = 8; // byte count
-    outbuf[7] = 1; // indicate success
-    outbuf[8] = sim->m_ramData[commNumber];
+    out.setReply(true, {sim->m_ramData[commNumber]});
+
   }
-  else if (inbuf[8] == 0x44)
+  else if (in.data()[1] == 0x44)
   {
     // This is another type of Read command -- possibly from a different address space or device?
     // Unlike cmd 52h, it is followed by only a single byte (which must be an 8-bit address.)
-    const uint8_t commNumber = inbuf[9];
+    const uint8_t commNumber = in.data()[2];
     if (sim->m_ramData.count(commNumber) == 0)
     {
       sim->m_ramData[commNumber] = 0;
     }
-    outbuf[2] = 8; // byte count
-    outbuf[7] = 1; // indicate success
-    outbuf[8] = sim->m_ramData[commNumber];
+    out.setReply(true, {sim->m_ramData[commNumber]});
   }
   else
   {
@@ -918,15 +886,15 @@ void TesterSim::processBoschAlarmCommandToECU(const uint8_t* inbuf, uint8_t* out
 
 /**
  */
-void TesterSim::processBilsteinSuspensionCommandToECU(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim, bool /*hasVerbosePayload*/)
+void TesterSim::processBilsteinSuspensionCommandToECU(const Packet& in, Packet& out, TesterSim* sim, bool /*hasVerbosePayload*/)
 {
   // A typical command looks like: (... 13 01) 01 00 23 00 22
 
   // Is this attempting to read a location in ECU memory?
-  if (inbuf[8] == 0x01)
+  if (in.data()[1] == 0x01)
   {
-    const uint8_t addrHi = inbuf[9];
-    const uint8_t addrLo = inbuf[10];
+    const uint8_t addrHi = in.data()[2];
+    const uint8_t addrLo = in.data()[3];
     const uint16_t addr = ((uint16_t)addrHi << 8) | addrLo;
 
     if (sim->m_ramData.count(addr) == 0)
@@ -934,51 +902,59 @@ void TesterSim::processBilsteinSuspensionCommandToECU(const uint8_t* inbuf, uint
       sim->m_ramData[addr] = 0;
     }
 
-    outbuf[2] = 12; // Total byte count for the SD2 Tester msg (should match the index of the last byte)
-    outbuf[7] = 1;  // Indication of success. Note that this byte overwrites a byte *count* that we
-                    // received from WSDC32 (where it would have been 05 for the 5-byte message that follows)
-    outbuf[8] = 0x01;
-    outbuf[9] = addrHi;
-    outbuf[10] = addrLo;
-    outbuf[11] = sim->m_ramData[addr];
-    outbuf[12] = (outbuf[8] ^ outbuf[9] ^ outbuf[10] ^ outbuf[11]);
-  }
-  else if (inbuf[8] == 0x06) // unknown
-  {
-    const uint8_t addrHi = inbuf[9];
-    const uint8_t addrLo = inbuf[10];
+    // Total byte count for the SD2 Tester msg (should match the index of the last byte)
+    // Indication of success. Note that this byte overwrites a byte *count* that we
+    // received from WSDC32 (where it would have been 05 for the 5-byte message that follows)
 
-    outbuf[2] = 12; // total byte count for the SD2 Tester msg (should match the index of the last byte)
-    outbuf[7] = 1;  // Indication of success. Note that this byte overwrites a byte *count* that we
-                    // received from WSDC32 (where it would have been 05 for the 5-byte message that follows)
-    outbuf[8] = 0x06;
-    outbuf[9] = addrHi;
-    outbuf[10] = addrLo;
-    outbuf[11] = 7;
-    outbuf[12] = (outbuf[8] ^ outbuf[9] ^ outbuf[10] ^ outbuf[11]);
+    std::vector<uint8_t> outbuf(5);
+    outbuf[0] = 0x01;
+    outbuf[1] = addrHi;
+    outbuf[2] = addrLo;
+    outbuf[3] = sim->m_ramData[addr];
+    outbuf[4] = (outbuf[0] ^ outbuf[1] ^ outbuf[2] ^ outbuf[3]);
+    out.setReply(true, outbuf);
   }
-  else if (inbuf[8] == 0x0B) // something to do with actuator activation
+  else if (in.data()[1] == 0x06) // unknown
+  {
+    const uint8_t addrHi = in.data()[2];
+    const uint8_t addrLo = in.data()[3];
+
+    // total byte count for the SD2 Tester msg (should match the index of the last byte)
+    // Indication of success. Note that this byte overwrites a byte *count* that we
+    // received from WSDC32 (where it would have been 05 for the 5-byte message that follows)
+
+    std::vector<uint8_t> outbuf(5);
+    outbuf[0] = 0x06;
+    outbuf[1] = addrHi;
+    outbuf[2] = addrLo;
+    outbuf[3] = 7;
+    outbuf[4] = (outbuf[0] ^ outbuf[1] ^ outbuf[2] ^ outbuf[3]);
+    out.setReply(true, outbuf);
+  }
+  else if (in.data()[1] == 0x0B) // something to do with actuator activation
   {
     sim->log("Warning: Bilstein suspension ECU command for actuators not yet implemented");
   }
-  else if (inbuf[8] == 0x11)
+  else if (in.data()[1] == 0x11)
   {
     // This command seems to be requesting fault codes from a redundant memory location
     // In addition to the faults being stored in normally addressable RAM locations
     // (at least for BSOS0088), they seem to be stored -- with the same relative bit
     // positions -- in data locations that are read with the command 0x11.
 
-    const uint8_t byteA = inbuf[9];
-    const uint8_t byteB = inbuf[10];
+    const uint8_t byteA = in.data()[2];
+    const uint8_t byteB = in.data()[3];
 
-    outbuf[2] = 12; // total byte count for the SD2 Tester msg (should match the index of the last byte)
-    outbuf[7] = 1;  // Indication of success. Note that this byte overwrites a byte *count* that we
-                    // received from WSDC32 (where it would have been 05 for the 5-byte message that follows)
-    outbuf[8] = 0x11;
-    outbuf[9] = byteA;
-    outbuf[10] = byteB;
-    outbuf[11] = sim->m_ramData[0x55 + byteB]; // NOTE: this works for BSOS0088, others may vary
-    outbuf[12] = (outbuf[8] ^ outbuf[9] ^ outbuf[10] ^ outbuf[11]);
+    // total byte count for the SD2 Tester msg (should match the index of the last byte)
+    // Indication of success. Note that this byte overwrites a byte *count* that we
+    // received from WSDC32 (where it would have been 05 for the 5-byte message that follows)
+
+    std::vector<uint8_t> outbuf(5);
+    outbuf[0] = 0x11;
+    outbuf[1] = byteA;
+    outbuf[2] = byteB;
+    outbuf[3] = sim->m_ramData[0x55 + byteB]; // NOTE: this works for BSOS0088, others may vary
+    outbuf[4] = (outbuf[0] ^ outbuf[1] ^ outbuf[2] ^ outbuf[3]);
   }
   else
   {
@@ -986,45 +962,42 @@ void TesterSim::processBilsteinSuspensionCommandToECU(const uint8_t* inbuf, uint
   }
 }
 
-void TesterSim::process15DisplayString(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process15DisplayString(const Packet& in, Packet& out, TesterSim* sim)
 {
-  std::string dstring((char*)(inbuf + 14), inbuf[2] - 13);
+  std::string dstring((char*)(in.data().data() + 6), in.data().size() - 6);
   sim->log(QString("Display string on Tester screen: '%1'").arg(QString::fromStdString(dstring)));
-  outbuf[2] = 7;
-  outbuf[7] = 1;
+  out.setReply(true, {});
 }
 
-void TesterSim::process1C(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process1C(const Packet& in, Packet& out, TesterSim* sim)
 {
-  const uint8_t pipeNum = inbuf[5];
+  const uint8_t pipeNum = in.module();
   sim->log(QString("Shut down ECU appl thread monitoring pipe %1").arg(pipeNum));
 
   if (sim->m_applRun[pipeNum])
   {
     sim->m_applRun[pipeNum] = false;
-    outbuf[2] = 7;
-    outbuf[7] = 1;
+    out.setReply(true, {});
   }
   else
   {
     sim->log("Thread not yet running; replying with negative status from applModGen...");
-    outbuf[2] = 7;
-    outbuf[5] = 0;
-    outbuf[7] = 0xfe;
+    //outbuf[5] = 0;
+    //outbuf[7] = 0xfe;
+    out.setReply(false, {});
   }
 }
 
-void TesterSim::process1ECloseFile(const uint8_t* /*inbuf*/, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process1ECloseFile(const Packet& /*in*/, Packet& out, TesterSim* sim)
 {
   sim->m_curFileContents = nullptr;
   sim->log(QString("Close file (which is currently '%1')").arg(sim->m_curFile));
-  outbuf[2] = 7;
-  outbuf[7] = 1;
+  out.setReply(true, {});
 }
 
-void TesterSim::process20OpenFileForWriting(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process20OpenFileForWriting(const Packet& in, Packet& out, TesterSim* sim)
 {
-  const QString filenameWithPath = QString::fromStdString(std::string((char*)(inbuf + 7), inbuf[2] - 6));
+  const QString filenameWithPath = QString::fromStdString(std::string((char*)in.data().data(), in.data().size()));
   const QFileInfo fileinfo(filenameWithPath);
   const QString filenameOnly = fileinfo.fileName();
   const QString dirOnly = fileinfo.absolutePath();
@@ -1034,13 +1007,12 @@ void TesterSim::process20OpenFileForWriting(const uint8_t* inbuf, uint8_t* outbu
   sim->m_curFileContents = &(sim->m_fileContents[dirOnly][filenameOnly]);
   sim->m_curFileContents->clear(); // only truncate is supported (no append)
   sim->log(QString("Open file for writing: %1 (in dir %2)").arg(sim->m_curFile).arg(sim->m_curDir));
-  outbuf[2] = 7;
-  outbuf[7] = 1;
+  out.setReply(true, {});
 }
 
-void TesterSim::process21WriteToFile(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process21WriteToFile(const Packet& in, Packet& out, TesterSim* sim)
 {
-  const int byteCount = inbuf[2] - 0xb;
+  const int byteCount = in.data().size() - 4;
 
   // If cmd 0x21 (Write-to-File) was the last packet we received,
   // just signal that we're processing another write. This is done
@@ -1058,15 +1030,14 @@ void TesterSim::process21WriteToFile(const uint8_t* inbuf, uint8_t* outbuf, Test
   }
   for (int i = 0; i < byteCount; i++)
   {
-    sim->m_curFileContents->append(inbuf[0xb + i]);
+    sim->m_curFileContents->append(in.data()[4 + i]);
   }
-  outbuf[2] = 7;
-  outbuf[7] = 1;
+  out.setReply(true, {});
 }
 
-void TesterSim::process23OpenFileForReading(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process23OpenFileForReading(const Packet& in, Packet& out, TesterSim* sim)
 {
-  const QString filenameWithPath = QString::fromStdString(std::string((char*)(inbuf + 7), inbuf[2] - 6));
+  const QString filenameWithPath = QString::fromStdString(std::string((char*)in.data().data(), in.data().size()));
   const QFileInfo fileinfo(filenameWithPath);
   const QString filenameOnly = fileinfo.fileName();
   const QString dirOnly = fileinfo.absolutePath();
@@ -1078,11 +1049,10 @@ void TesterSim::process23OpenFileForReading(const uint8_t* inbuf, uint8_t* outbu
   memset(sim->m_checksumBuf, 0, CHKSUM_BUF_SIZE);
 
   sim->log(QString("Open file for reading: %1 (in dir %2)").arg(sim->m_curFile).arg(sim->m_curDir));
-  outbuf[2] = 7;
-  outbuf[7] = 1;
+  out.setReply(true, {});
 }
 
-void TesterSim::process24ReadFromFile(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process24ReadFromFile(const Packet& in, Packet& out, TesterSim* sim)
 {
   if (!sim->m_curFileContents)
   {
@@ -1094,22 +1064,20 @@ void TesterSim::process24ReadFromFile(const uint8_t* inbuf, uint8_t* outbuf, Tes
   const int numBytesToSend = (bytesLeftInFile >= CHKSUM_BUF_SIZE) ? CHKSUM_BUF_SIZE : bytesLeftInFile;
   sim->log(QString("Read from file (%1 bytes left, %2 bytes in this chunk, file pos 0x%3)").
     arg(bytesLeftInFile).arg(numBytesToSend).arg(sim->m_fileReadPos, 8, 16, QChar('0')));
-  outbuf[2] = numBytesToSend + 0xc;
-  outbuf[7] = 1;
-  outbuf[8] = inbuf[7];
-  outbuf[9] = inbuf[8];
-  outbuf[10] = inbuf[9];
-  outbuf[11] = inbuf[10];
+  std::vector<uint8_t> outbuf;
+  outbuf.reserve(numBytesToSend + 4);
+  std::copy_n(in.data().data(), 4, outbuf.end());
+
   if (numBytesToSend > 0)
   {
     for (int i = 0; i < numBytesToSend; i++)
     {
-      outbuf[12 + i] = sim->m_curFileContents->at(sim->m_fileReadPos + i);
-      sim->m_checksumBuf[i] += outbuf[12 + i];
+      outbuf[4 + i] = sim->m_curFileContents->at(sim->m_fileReadPos + i);
+      sim->m_checksumBuf[i] += outbuf[4 + i];
     }
-    const int checksumBufPos = 12 + numBytesToSend;
+    const int checksumBufPos = 4 + numBytesToSend;
     outbuf[checksumBufPos] = 0;
-    for (int i = 12; i < 12 + numBytesToSend; i++)
+    for (int i = 4; i < 4 + numBytesToSend; i++)
     {
       outbuf[checksumBufPos] += outbuf[i];
     }
@@ -1121,34 +1089,32 @@ void TesterSim::process24ReadFromFile(const uint8_t* inbuf, uint8_t* outbuf, Tes
   {
     // No more bytes to send from this file.
     // Indicate this with a 00 in position 0xC of the reply message.
-    outbuf[12] = 0;
+    outbuf[4] = 0;
   }
+  out.setReply(true, outbuf);
 }
 
-void TesterSim::process25ChecksumFile(const uint8_t* /*inbuf*/, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process25ChecksumFile(const Packet& /*inbuf*/, Packet& out, TesterSim* sim)
 {
   sim->log("Request for checksum verification of file");
-  outbuf[1] = 0;
-  outbuf[2] = 0x75;
-  outbuf[7] = 1;
-
+  std::vector<uint8_t> outbuf(CHKSUM_BUF_SIZE);
   for (int i = 0; i < CHKSUM_BUF_SIZE; i++)
   {
-    outbuf[8 + i] = ~(sim->m_checksumBuf[i]);
+    outbuf[i] = ~(sim->m_checksumBuf[i]);
   }
+  out.setReply(true, outbuf);
 }
 
-void TesterSim::process2AChdir(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process2AChdir(const Packet& in, Packet& out, TesterSim* sim)
 {
-  const QString curDir = QString::fromStdString(std::string((char*)(inbuf + 7), inbuf[2] - 6));
+  const QString curDir = QString::fromStdString(std::string((char*)in.data().data(), in.data().size()));
   sim->m_curDir = curDir;
   sim->m_curDirIterator = sim->m_fileContents[curDir].begin();
   sim->log(QString("Change directory: %1").arg(curDir));
-  outbuf[2] = 7;
-  outbuf[7] = 1;
+  out.setReply(true, {});
 }
 
-void TesterSim::process2BGetNextDirEntry(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process2BGetNextDirEntry(const Packet& in, Packet& out, TesterSim* sim)
 {
   sim->log("Request for next directory entry");
 
@@ -1161,69 +1127,63 @@ void TesterSim::process2BGetNextDirEntry(const uint8_t* inbuf, uint8_t* outbuf, 
     const uint8_t truncLen = (filename.length() < 90) ? filename.length() : 90;
     sim->log(QString(" Truncated length of filename: %1").arg(truncLen));
 
-    outbuf[2] = 38 + truncLen - 1;
-    outbuf[7] = 1; // indicate success
-    outbuf[8] = inbuf[7]; // 32-bit sequence num
-    outbuf[9] = inbuf[8];
-    outbuf[10] = inbuf[9];
-    outbuf[11] = inbuf[10];
-    outbuf[12] = 2; // 1 == dir, 2 == other (e.g. regular file)
-    outbuf[13] = (filesize >> 24) & 0xff;
-    outbuf[14] = (filesize >> 16) & 0xff;
-    outbuf[15] = (filesize >> 8) & 0xff;
-    outbuf[16] = filesize & 0xff;
-    memcpy(outbuf + 17, "AUG-06-1998  13:24:55", 21);
-    strncpy((char*)(outbuf + 38), filename.toStdString().c_str(), 89);
+    std::vector<uint8_t> outbuf = {
+      in.data()[0], // 32-bit sequence num
+      in.data()[1],
+      in.data()[2],
+      in.data()[3],
+      2, // 1 == dir, 2 == other (e.g. regular file)
+      static_cast<uint8_t>((filesize >> 24) & 0xff),
+      static_cast<uint8_t>((filesize >> 16) & 0xff),
+      static_cast<uint8_t>((filesize >> 8) & 0xff),
+      static_cast<uint8_t>(filesize & 0xff),
+    };
+    //memcpy(outbuf + 10, "AUG-06-1998  13:24:55", 21);
+    //strncpy((char*)(outbuf + 30), filename.toStdString().c_str(), 89);
 
     sim->m_curDirIterator++;
+    out.setReply(true, outbuf);
   }
   else
   {
     // indicate end of directory
-    outbuf[2] = 7;
-    outbuf[7] = 4;
+    //outbuf[7] = 4;
+    out.setReply(false, {});
   }
 }
 
-void TesterSim::process3AGetDateTime(const uint8_t* /*inbuf*/, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process3AGetDateTime(const Packet& /*in*/, Packet& out, TesterSim* sim)
 {
   sim->log("Request for Tester date/time");
-  outbuf[2] = 0x0d;
-  outbuf[7] = 0x06;
-  outbuf[8] = 0x31;
-  outbuf[9] = 0x50;
-  outbuf[10] = 0x02;
-  outbuf[11] = 0x12;
-  outbuf[12] = 0x23;
-  outbuf[13] = 0x06;
+  std::vector<uint8_t> outbuf = {
+    0x06,
+    0x31,
+    0x50,
+    0x02,
+    0x12,
+    0x23,
+    0x06,
+  };
+  out.setReply(true, outbuf);
 }
 
-void TesterSim::process3DEraseFlash(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process3DEraseFlash(const Packet& in, Packet& out, TesterSim* sim)
 {
   sim->log("Command to erase flash on Tester");
-  outbuf[2] = 8;
-  outbuf[8] = inbuf[7];
-  outbuf[7] = 1;
+  out.setReply(true, {in.data()[0]});
 }
 
-void TesterSim::process60SiliconNumber(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process60SiliconNumber(const Packet& /*in*/, Packet& out, TesterSim* sim)
 {
   sim->log("Request silicon number");
-  outbuf[2] = 14;
-  outbuf[7] = 0;
-  outbuf[8] = 0;
-  outbuf[9] = 0;
-  outbuf[10] = 0;
-  outbuf[11] = 0;
-  outbuf[12] = 0;
-  outbuf[13] = 0;
-  outbuf[14] = 0;
+  std::vector<uint8_t> outbuf(8, 0);
+  out.setReply(true, outbuf);
 }
 
-void TesterSim::process61SetBoard(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process61SetBoard(const Packet& in, Packet& out, TesterSim* sim)
 {
   sim->log("Set board");
-  uint8_t boardType = inbuf[7];
+  uint8_t boardType = in.data()[0];
   if (boardType == 2)
   {
     sim->setTesterType(TesterType::xBOARD);
@@ -1232,31 +1192,25 @@ void TesterSim::process61SetBoard(const uint8_t* inbuf, uint8_t* outbuf, TesterS
   {
     sim->setTesterType(TesterType::SD2);
   }
+  out.setReply(true, {});
 }
 
-void TesterSim::process62SendReset(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process62SendReset(const Packet& /*in*/, Packet& out, TesterSim* sim)
 {
   sim->log("Request reset");
+  out.setReply(true, {});
 }
 
-void TesterSim::process63TesterStatus(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
+void TesterSim::process63TesterStatus(const Packet& /*in*/, Packet& out, TesterSim* sim)
 {
   sim->log("Request for Tester status");
-  uint8_t offset = 0;
-  uint8_t lenByte = 2;
-  uint8_t len = 11;
-  if (sim->m_testerType == TesterType::xBOARD)
-  {
-    //offset = 1;
-    lenByte = 4;
-    len = 14;
-  }
-
-  outbuf[lenByte] = len;
-  outbuf[8 + offset] = 0;
-  outbuf[9 + offset] = 7;
-  outbuf[10 + offset] = 0x14;
-  outbuf[11 + offset] = 0x5d;
+  std::vector<uint8_t> outbuf = {
+    0,
+    7,
+    0x14,
+    0x5d,
+  };
+  out.setReply(true, outbuf);
 }
 
 bool TesterSim::loadState(const QString& filename)
