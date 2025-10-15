@@ -13,6 +13,7 @@
 
 std::map<uint8_t,std::function<void(const uint8_t*,uint8_t*,TesterSim*)>> TesterSim::s_commandProcs =
 {
+  { 0x00, TesterSim::process63TesterStatus },
   { 0x01, TesterSim::process01TabletInfo },
   { 0x02, TesterSim::process02SerialNo },
   { 0x09, TesterSim::process09 },
@@ -217,11 +218,18 @@ bool TesterSim::sendReply(bool print)
   {
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
 
-    // Although m_outbuf[1] should contain the hi byte
-    // of a 16-bit byte count, it seems that neither the
-    // win32 size nor the Tester ever send packets with
-    // more than 128 bytes total (including the prefix).
-    const uint16_t len = m_outbuf[2] + 1;
+    uint16_t len = 0;
+    if (m_testerType == TesterType::xBOARD)
+    {
+      // xBOARD: length includes entire message including header and checksum
+      len = static_cast<uint16_t>((m_outbuf[3] << 8) | m_outbuf[4]);
+    }
+    else
+    {
+      // SD2: len = prefix(1) + length(low in [2], high in [1] but historically 0)
+      // For backward compatibility keep the existing low-byte based total
+      len = static_cast<uint16_t>(m_outbuf[2] + 1);
+    }
     if (print)
     {
       printPacket(m_outbuf);
@@ -237,34 +245,70 @@ bool TesterSim::sendReply(bool print)
 bool TesterSim::processBuf(bool print)
 {
   bool status = false;
-  const uint8_t size = m_inbuf[2] + 1;
+  const bool isXBoard = (m_testerType == TesterType::xBOARD);
+  uint16_t size = 0;
+  int commandIndex = 0;
 
-  // TODO: update this to handle xBOARD packets
-  if (size >= 7)
+  if (isXBoard)
+  {
+    // xBOARD: header = 'W','A','Y' (3 bytes), length at [3],[4] includes header and checksum
+    size = static_cast<uint16_t>((m_inbuf[3] << 8) | m_inbuf[4]);
+    commandIndex = 7;
+  }
+  else
+  {
+    // SD2: prefix at [0], length at [1],[2] does not include prefix
+    uint16_t length = static_cast<uint16_t>((m_inbuf[1] << 8) | m_inbuf[2]);
+    size = static_cast<uint16_t>(length + 1);
+    commandIndex = 6;
+  }
+
+  const int minPacketSize = isXBoard ? 9 : 7;
+  if (size >= minPacketSize)
   {
     memcpy(m_outbuf, m_inbuf, size); // tablet SW usually starts by copying the message
                                      // from the PC into the reply buffer
-    m_outbuf[0] = 0x54; // fixed value indicating a reply from the tester in
-                        // linked-to-PC mode
-    m_outbuf[1] = 0x00; // tester only seems to send messages with a length < 0x80,
-                        // so the hi byte is always 00
+    if (!isXBoard)
+    {
+      m_outbuf[0] = 'T';
+      m_outbuf[1] = 0x00; // hi byte of length
+    }
+    else
+    {
+      m_outbuf[0] = 'D';
+      m_outbuf[1] = 'E';
+      m_outbuf[2] = 'S';
+      m_outbuf[3] = 0x00; // hi byte of length
+    }
+    // For xBOARD, preserve the copied header/length; response shaping handled per-command
 
     // To keep the log output cleaner, we keep track of whether we
     // received multiple consecutive Write-to-File commands.
-    if (m_inbuf[6] != 0x21)
+    if (m_inbuf[commandIndex] != 0x21)
     {
       m_lastCmdWasWriteToFile = false;
     }
 
-    if (s_commandProcs.count(m_inbuf[6]))
+    if (s_commandProcs.count(m_inbuf[commandIndex]))
     {
-      s_commandProcs.at(m_inbuf[6])(m_inbuf, m_outbuf, this);
+      s_commandProcs.at(m_inbuf[commandIndex])(m_inbuf, m_outbuf, this);
     }
     else
     {
-      emit logMsg(QString("Sending generic 'success' response to command msg type 0x%1").arg(m_inbuf[6], 2, 16, QChar('0')));
-      m_outbuf[2] = 7;
-      m_outbuf[7] = 1;
+      emit logMsg(QString("Sending generic 'success' response to command msg type 0x%1").arg(m_inbuf[commandIndex], 2, 16, QChar('0')));
+      if (!isXBoard)
+      {
+        m_outbuf[2] = 7;   // total length minus prefix for SD2 reply
+        m_outbuf[7] = 1;   // success
+      }
+      else
+      {
+        const uint16_t replyLen = 10;
+        m_outbuf[3] = static_cast<uint8_t>((replyLen >> 8) & 0xFF);
+        m_outbuf[4] = static_cast<uint8_t>(replyLen & 0xFF);
+        m_outbuf[8] = 0; // success
+        // Checksum will be calculated later where appropriate
+      }
     }
     status = sendReply(print);
 
@@ -277,7 +321,7 @@ bool TesterSim::processBuf(bool print)
   }
   else
   {
-    emit logMsg("Warning: received message of fewer than 7 bytes.\n");
+    emit logMsg("Warning: received message smaller than minimum size for active protocol.\n");
   }
   return status;
 }
@@ -302,21 +346,26 @@ void TesterSim::stopListening()
  */
 bool TesterSim::shouldDisplayPacket(const uint8_t* buf)
 {
-  const uint8_t numBytes = buf[2];
   bool status = true;
-  if (memcmp(buf, m_lastInbuf, numBytes) == 0)
+  const uint16_t totalLen = (m_testerType == TesterType::xBOARD)
+                            ? static_cast<uint16_t>((buf[3] << 8) | buf[4])
+                            : static_cast<uint16_t>(buf[2]);
+  if (totalLen > 0 && memcmp(buf, m_lastInbuf, totalLen) == 0)
   {
     emit lastLogMsgRepeated();
     status = false;
   }
-  memcpy(m_lastInbuf, buf, numBytes);
+  if (totalLen > 0) memcpy(m_lastInbuf, buf, totalLen);
   return status;
 }
 
 void TesterSim::printPacket(const uint8_t* buf)
 {
   QString packetStr;
-  for (int i = 0; i <= buf[2]; i++)
+  const uint16_t totalLen = (m_testerType == TesterType::xBOARD)
+                            ? static_cast<uint16_t>((buf[3] << 8) | buf[4])
+                            : static_cast<uint16_t>(buf[2]) + 1;
+  for (int i = 0; i < totalLen; i++)
   {
     packetStr += QString("%1 ").arg(buf[i], 2, 16, QChar('0'));
   }
@@ -1193,11 +1242,21 @@ void TesterSim::process62SendReset(const uint8_t* inbuf, uint8_t* outbuf, Tester
 void TesterSim::process63TesterStatus(const uint8_t* inbuf, uint8_t* outbuf, TesterSim* sim)
 {
   sim->log("Request for Tester status");
-  outbuf[2] = 11;
-  outbuf[8] = 0;
-  outbuf[9] = 7;
-  outbuf[10] = 0x14;
-  outbuf[11] = 0x5d;
+  uint8_t offset = 0;
+  uint8_t lenByte = 2;
+  uint8_t len = 11;
+  if (sim->m_testerType == TesterType::xBOARD)
+  {
+    //offset = 1;
+    lenByte = 4;
+    len = 14;
+  }
+
+  outbuf[lenByte] = len;
+  outbuf[8 + offset] = 0;
+  outbuf[9 + offset] = 7;
+  outbuf[10 + offset] = 0x14;
+  outbuf[11 + offset] = 0x5d;
 }
 
 bool TesterSim::loadState(const QString& filename)
